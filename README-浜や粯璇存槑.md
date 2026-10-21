@@ -46,16 +46,14 @@
 
 ```bash
 # Windows（推荐）
-双击 start.bat          # 或手动执行下方命令
-
-# 手动
+# Windows 手动启动
 cd backend
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
-set SECRET_KEY=your-secret-key   # 生产必配固定值
-set FLASK_DEBUG=0
 .venv\Scripts\python.exe app.py
 ```
+
+启动前请按需通过环境变量配置 `SECRET_KEY`；不要将真实密钥提交到仓库。
 
 浏览器打开 **http://127.0.0.1:5000**
 
