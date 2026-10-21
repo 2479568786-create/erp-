@@ -55,6 +55,7 @@ function renderOnlineProductsPage(route) {
         <button class="online-tab" data-status="rejected" onclick="switchOnlineTab(this)">审核不通过</button>
         <button class="online-tab" data-status="offline" onclick="switchOnlineTab(this)">已下架</button>
         <button class="online-tab" data-status="archived" onclick="switchOnlineTab(this)">已归档</button>
+        <button class="online-tab" data-market-tab="1" onclick="switchOnlineTab(this)">市场情报</button>
       </div>
 
       <!-- 表格区域 -->
@@ -88,6 +89,25 @@ function renderOnlineProductsPage(route) {
           <p>暂无在线商品</p>
           <p style="font-size:12px;margin-top:4px;" id="onlineEmptyHint">通过「创建产品」或从采集箱发布商品到在线列表</p>
         </div>
+      </div>
+
+      <!-- 市场情报面板（从 JLC 工作台迁移到 ERP 在线商品） -->
+      <div id="marketIntelPanel" style="display:none;">
+        <div style="display:flex;align-items:center;gap:12px;padding:12px 4px;border-bottom:1px solid #e5e7eb;">
+          <span style="font-weight:700;font-size:15px;color:#111827;">市场情报</span>
+          <span id="marketIntelNotice" style="font-size:12px;color:#9ca3af;"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;padding:12px 4px;flex-wrap:wrap;">
+          <select id="marketCategorySelect" onchange="loadMarketIntelProducts();loadMarketIntelKeywords();" style="height:34px;padding:0 10px;border-radius:8px;border:1px solid #d1d5db;background:#fff;color:#111827;font-size:13px;"></select>
+          <select id="marketRankingSelect" onchange="loadMarketIntelProducts();" style="height:34px;padding:0 10px;border-radius:8px;border:1px solid #d1d5db;background:#fff;color:#111827;font-size:13px;">
+            <option value="hot">热销榜</option>
+            <option value="rising">飙升榜</option>
+          </select>
+          <button class="btn btn-xs btn-ghost" onclick="loadMarketIntelProducts();loadMarketIntelKeywords();">刷新</button>
+        </div>
+        <div id="marketIntelGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px;padding:8px 4px;"></div>
+        <div id="marketIntelKeywords" style="padding:14px 4px;"></div>
+        <div id="marketIntelSearchVisibility" style="padding:14px 4px;"></div>
       </div>
 
       <!-- 底部操作栏 -->
@@ -146,7 +166,8 @@ function renderOnlineStoreOptions(sel, stores) {
     opts.push('<option value="" disabled>暂无已授权店铺</option>');
   } else {
     active.forEach(s => {
-      const sid = s.store_id || s.storeId || s.id;
+      // 列表筛选与同步接口使用本地 stores.id，不是 Ozon 的 store_id。
+      const sid = s.id || s.store_id || s.storeId;
       const name = s.alias || s.name || s.store_name || sid;
       opts.push(`<option value="${escapeAttr(sid)}">${escapeHtml(name)}</option>`);
     });
@@ -177,7 +198,7 @@ async function reloadOnlineProducts() {
     if (res && res.code === 200 && res.data && Array.isArray(res.data.list)) {
       allOnlineProducts = res.data.list;
       isBackendUnavailable = false;
-      const statsRes = await Api.getOnlineProductStats();
+      const statsRes = await Api.getOnlineProductStats(currentOnlineStoreId);
       if (statsRes && statsRes.code === 200) renderOnlineTabCounts(statsRes.data);
     } else {
       allOnlineProducts = [];
@@ -220,7 +241,7 @@ function renderOnlineTable() {
       <td><input type="checkbox" class="table-check-item online-check" value="${p.id}"></td>
       <td>
         <div class="product-info-cell">
-          <img class="product-thumb" src="${escapeAttr(proxyImage(typeof p.image === 'string' ? p.image : ''))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2260%22 height=%2260%22%3E%3Crect width=%22100%25%22 height=%22100%25%22 fill=%22%23f5f5f5%22/%3E%3Ctext x=%2250%25%22 y=%2255%25%22 text-anchor=%22middle%22 fill=%22%23ccc%22 font-size=%2211%22%3E无图%3C/text%3E%3C/svg%3E'">
+          <img class="product-thumb" src="${escapeAttr(proxyImage(typeof p.image === 'string' ? p.image : ''))}" data-original-image="${escapeAttr(typeof p.image === 'string' ? p.image : '')}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="if(this.dataset.originalImage&&this.dataset.originalImage!==this.src){const imageUrl=this.dataset.originalImage;this.dataset.originalImage='';this.src=imageUrl;}else{this.onerror=null;this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2260%22 height=%2260%22%3E%3Crect width=%22100%25%22 height=%22100%25%22 fill=%22%23f5f5f5%22/%3E%3Ctext x=%2250%25%22 y=%2255%25%22 text-anchor=%22middle%22 fill=%22%23ccc%22 font-size=%2211%22%3E无图%3C/text%3E%3C/svg%3E'}">
           <div class="product-text">
             <div class="product-name">${p.title}</div>
             <div class="product-source-row">
@@ -254,6 +275,7 @@ function renderOnlineTable() {
       <td>
         <div class="action-btns">
           <button class="action-link" onclick="editOnlineProductCard('${p.id}')">编辑商品</button>
+          <button class="action-link" onclick="startRelistOnlineProduct('${p.id}')">老链接新上</button>
           <button class="action-link" onclick="editOnlineProduct('${p.id}')">价格库存</button>
           <button class="action-link" onclick="syncProduct('${p.id}')">同步</button>
           <button class="action-link more-action" onclick="toggleOnlineMore(this)">更多 &#9662;</button>
@@ -343,6 +365,12 @@ function getOnlineStatusBadge(status) {
 function switchOnlineTab(btn) {
   document.querySelectorAll('.online-tab').forEach(t => t.classList.remove('active'));
   btn.classList.add('active');
+  if (btn.dataset.marketTab === '1') {
+    currentOnlineStatus = '';
+    showMarketIntelligence();
+    return;
+  }
+  hideMarketIntelligence();
   currentOnlineStatus = btn.dataset.status;
   filterOnlineProducts();
 }
@@ -350,6 +378,7 @@ function switchOnlineTab(btn) {
 function renderOnlineTabCounts(data) {
   const stats = (data && data.stats) || {};
   document.querySelectorAll('.online-tab').forEach(tab => {
+    if (tab.dataset.marketTab === '1') return;
     const value = tab.dataset.status ? (stats[tab.dataset.status] || 0) : (data.total || 0);
     let countEl = tab.querySelector('.tab-count');
     if (!countEl) {
@@ -370,6 +399,7 @@ function updateOnlineTabCounts() {
     counts[s] = allOnlineProducts.filter(p => p.status === s).length;
   });
   document.querySelectorAll('.online-tab').forEach(tab => {
+    if (tab.dataset.marketTab === '1') return;
     const st = tab.dataset.status;
     const countEl = tab.querySelector('.tab-count');
     if (!countEl) tab.innerHTML += ` <span class="tab-count">(${counts[st]})</span>`;
@@ -739,16 +769,31 @@ async function syncProducts() {
     Toast.show('后端未连接，无法同步。请先启动后端服务并配置 Ozon API 凭证', 'warning');
     return;
   }
-  Toast.show('正在从 Ozon 店铺同步商品，可能需要几分钟...', 'info');
+  Toast.show(currentOnlineStoreId ? '正在同步当前店铺商品，可能需要几分钟...' : '正在同步全部店铺商品，可能需要几分钟...', 'info');
   try {
-    const res = await Api.syncOnlineProducts({});
-    if (res && res.code === 200) {
-      const d = res.data || {};
-      Toast.show(`同步完成：共 ${d.total||0} 个，新增 ${d.inserted||0}，更新 ${d.updated||0}，失败 ${d.failed||0}${d.orphanDeleted ? `，清理残留 ${d.orphanDeleted}` : ''}`, 'success');
-      await reloadOnlineProducts();
+    let storesToSync;
+    if (currentOnlineStoreId) {
+      storesToSync = [currentOnlineStoreId];
     } else {
-      Toast.show('同步失败：' + (res && res.msg ? res.msg : '未知错误'), 'error');
+      await loadOnlineStoreFilter();
+      storesToSync = (_onlineStoresCache || [])
+        .filter(store => store.authStatus === 'active' || !store.authStatus)
+        .map(store => store.id || store.store_id || store.storeId)
+        .filter(Boolean);
     }
+    if (!storesToSync.length) {
+      Toast.show('没有可同步的已授权店铺', 'warning');
+      return;
+    }
+    const totals = { total: 0, inserted: 0, updated: 0, failed: 0, orphanDeleted: 0 };
+    for (const storeId of storesToSync) {
+      const res = await Api.syncOnlineProducts({ storeId });
+      if (!res || res.code !== 200) throw new Error(res?.msg || `店铺 ${storeId} 同步失败`);
+      const data = res.data || {};
+      Object.keys(totals).forEach(key => { totals[key] += Number(data[key] || 0); });
+    }
+    Toast.show(`同步完成：共 ${totals.total} 个，新增 ${totals.inserted}，更新 ${totals.updated}，失败 ${totals.failed}${totals.orphanDeleted ? `，清理残留 ${totals.orphanDeleted}` : ''}`, 'success');
+    await reloadOnlineProducts();
   } catch (e) {
     Toast.show('同步异常：' + (e && e.message ? e.message : e), 'error');
   }
@@ -799,6 +844,15 @@ async function saveOnlineEditorProduct(product, id) {
   buttons.forEach(button => { button.disabled = true; });
   try {
     collectEditFormToProduct(product, { skipValidation: true });
+    const originalOfferId = String(product.offerId || '').trim();
+    if (!originalOfferId) throw new Error('未读取到原 Ozon SKU 编码，无法安全更新');
+    if (!Array.isArray(product.skus) || product.skus.length !== 1) {
+      throw new Error('在线编辑只支持更新当前 SKU；新增 SKU 请使用“老链接新上”');
+    }
+    product.skus[0].skuCode = originalOfferId;
+    product.skus[0].offerId = originalOfferId;
+    product.skus[0].offer_id = originalOfferId;
+    product.offerId = originalOfferId;
     const validation = ProductMapping.validateForPublish(product);
     if (!validation.valid) {
       Toast.show('更新校验失败：\n' + validation.errors.join('\n'), 'error');
@@ -822,21 +876,59 @@ async function saveOnlineEditorProduct(product, id) {
 }
 
 /**
- * 老链接新上：以在线商品数据为底，在采集箱建立一条新记录（product_id 复用，id 全新）。
- * 由编辑弹窗头部「老链接新上」触发。
+ * 老链接新上：以在线商品数据为模板，在采集箱创建一条独立的新商品记录。
+ * 从在线商品列表直接读取完整商品数据，避免先进入原商品编辑器。
  */
-async function cloneOnlineProductAsNewLink(p) {
+async function startRelistOnlineProduct(id) {
+  Toast.show('正在读取原商品信息...', 'info');
+  try {
+    const response = await Api.getOnlineProductEditData(id);
+    if (!response || response.code !== 200 || !response.data) {
+      Toast.show(response?.msg || '读取原商品失败', 'error');
+      return;
+    }
+    await cloneOnlineProductAsNewLink(response.data);
+  } catch (error) {
+    Toast.show('读取原商品失败：' + (error?.message || error), 'error');
+  }
+}
+
+/** 从在线编辑器收集当前修改，并进入跨店铺 AI 重制流程。 */
+async function relistOnlineEditorProduct() {
+  const product = window._editingProduct;
+  if (!product || product._editorMode !== 'online') {
+    Toast.show('请先打开在线商品编辑器', 'warning');
+    return;
+  }
+  try {
+    await Promise.allSettled(Array.from(_editImageUploads || []));
+    collectEditFormToProduct(product, { skipValidation: true });
+    await cloneOnlineProductAsNewLink(product, { closeEditor: true });
+  } catch (error) {
+    Toast.show('读取当前编辑内容失败：' + (error?.message || error), 'error');
+  }
+}
+
+async function cloneOnlineProductAsNewLink(p, options = {}) {
   const confirmRes = await Modal.confirm(
-    `将以「${(p.title || '').slice(0, 30)}」的数据创建一条新采集记录（产品ID ${p.productId || p.skuId || '-'} 复用）。` +
-    `\n\n新记录可再次走「发布」流程上架到任意店铺，不影响当前在线商品。`
+    `将以「${(p.title || '').slice(0, 30)}」为模板创建一条新的采集记录。` +
+    `\n\n原在线商品不会被修改。创建后可编辑商品信息，并在发布时选择新的 Ozon 店铺。`
   );
   if (!confirmRes) return;
+  const targetStore = await chooseRelistTargetStore(p.storeId || p.store_id);
+  if (!targetStore) return;
+  const skus = (Array.isArray(p.skus) ? p.skus : []).filter(sku => sku && typeof sku === 'object').map(sku => {
+    const copy = { ...sku };
+    delete copy.sku;
+    delete copy.skuId;
+    return copy;
+  });
   const payload = {
     title: p.title || '',
     platform: 'ozon',
     description: p.description || '',
     price: p.price || '',
-    oldPrice: p.originalPrice || '',
+    oldPrice: p.oldPrice || p.originalPrice || '',
     images: Array.isArray(p.images) ? p.images : [],
     detailImages: Array.isArray(p.detailImages) ? p.detailImages : [],
     category: p.category || '',
@@ -847,19 +939,25 @@ async function cloneOnlineProductAsNewLink(p) {
     length: p.length || '',
     width: p.width || '',
     height: p.height || '',
-    productId: p.productId || p.skuId || '',
-    skuId: p.skuId || '',
+    productId: '',
     mergeCode: p.mergeNo || p.mergeCode || '',
     attributes: Array.isArray(p.attributes) ? p.attributes : [],
     skuAttrs: Array.isArray(p.skuAttrs) ? p.skuAttrs : [],
-    skus: Array.isArray(p.skus) ? p.skus : [],
-    storeId: p.storeId || p.store_id || '',
-    store: p.store || '',
+    skus,
+    storeId: targetStore.id,
+    store: targetStore.name,
   };
-  const resp = await Api.collectProduct(payload);
+  if (options.closeEditor) await Modal.forceClose();
+  let resp;
+  try {
+    resp = await Api.collectProduct(payload);
+  } catch (error) {
+    Toast.show('创建新记录失败：' + (error?.message || error), 'error');
+    return;
+  }
   if (resp && resp.code === 200) {
     const newId = resp.data?.id || resp.data?.product?.id || resp.data;
-    Toast.show('已创建新记录，可继续编辑或发布', 'success');
+    Toast.show('重制副本已创建：可在新编辑器中使用 AI 改图、生成商品卡并发布', 'success');
     // 跳转采集箱：列表会自动加载。轮询等待新记录进入 allProducts 后自动打开编辑；
     // 避免直接 editProduct(newId) 时内存中还没有该记录而报「未找到商品」。
     if (newId) {
@@ -881,6 +979,63 @@ async function cloneOnlineProductAsNewLink(p) {
   } else {
     Toast.show(resp?.msg || '创建新记录失败', 'error');
   }
+}
+
+async function chooseRelistTargetStore(sourceStoreId) {
+  let stores = window._cachedStores || [];
+  if (!stores.length) {
+    let response;
+    try {
+      response = await Api.getStores();
+    } catch (error) {
+      Toast.show('读取店铺列表失败：' + (error?.message || error), 'error');
+      return null;
+    }
+    if (response?.code !== 200) {
+      Toast.show(response?.msg || '读取店铺列表失败', 'error');
+      return null;
+    }
+    stores = response.data?.list || [];
+    window._cachedStores = stores;
+  }
+  const sourceIds = new Set([String(sourceStoreId || '')]);
+  const candidates = stores.filter(store => {
+    if (store.authStatus !== 'active') return false;
+    const ids = [store.id, store.store_id, store.storeId].filter(value => value != null).map(String);
+    return !ids.some(id => sourceIds.has(id));
+  });
+  if (!candidates.length) {
+    Toast.show('没有可用的新店铺；请先绑定并授权另一家 Ozon 店铺', 'warning');
+    return null;
+  }
+  return new Promise(resolve => {
+    const defaultStore = candidates[0];
+    const defaultId = defaultStore.id || defaultStore.store_id || defaultStore.storeId;
+    const options = candidates.map((store, index) => {
+      const id = store.id || store.store_id || store.storeId;
+      return `<label class="store-publish-option" style="display:flex;align-items:center;gap:10px;padding:12px 14px;border:1px solid var(--border-color);border-radius:8px;cursor:pointer;">
+        <input type="radio" name="relistTargetStore" value="${escapeAttr(id)}" ${index === 0 ? 'checked' : ''}>
+        <span>${escapeHtml(store.alias || store.name || store.store_id || id)}</span>
+      </label>`;
+    }).join('');
+    Modal.show({
+      title: '选择新店铺',
+      size: 'sm',
+      body: `<p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px;">复制后的商品将关联到所选店铺，来源店铺已排除。</p><div style="display:flex;flex-direction:column;gap:8px;">${options}</div>`,
+      footer: [
+        { text: '取消', class: 'btn-ghost', onClick: () => { Modal.close(); resolve(null); } },
+        { text: '确定', class: 'btn-primary', onClick: () => {
+          const selected = document.querySelector('input[name="relistTargetStore"]:checked');
+          const store = candidates.find(item => String(item.id || item.store_id || item.storeId) === selected?.value);
+          Modal.close();
+          resolve(store ? {
+            id: store.id || store.store_id || store.storeId,
+            name: store.alias || store.name || store.store_id || '',
+          } : { id: defaultId, name: defaultStore.alias || defaultStore.name || '' });
+        } },
+      ],
+    });
+  });
 }
 
 /** 编辑商品 */
@@ -1114,6 +1269,188 @@ function batchDeleteOnline() {
     filterOnlineProducts();
     Toast.show('已删除' + ids.length + '个商品', 'success');
   });
+}
+
+// ===== 市场情报（从 JLC 工作台迁移到 ERP 在线商品） =====
+
+let _marketIntelLoaded = false;
+
+function showMarketIntelligence() {
+  const panel = document.getElementById('marketIntelPanel');
+  const batch = document.getElementById('batchActionBar');
+  const table = document.getElementById('onlineTable');
+  const tableWrap = table ? table.closest('.collect-table-wrap') : null;
+  const footer = document.getElementById('onlineFooterBar');
+  if (batch) batch.style.display = 'none';
+  if (tableWrap) tableWrap.style.display = 'none';
+  if (footer) footer.style.display = 'none';
+  if (panel) panel.style.display = '';
+  if (!_marketIntelLoaded) loadMarketIntel();
+}
+
+function hideMarketIntelligence() {
+  const panel = document.getElementById('marketIntelPanel');
+  const batch = document.getElementById('batchActionBar');
+  const table = document.getElementById('onlineTable');
+  const tableWrap = table ? table.closest('.collect-table-wrap') : null;
+  const footer = document.getElementById('onlineFooterBar');
+  if (panel) panel.style.display = 'none';
+  if (batch) batch.style.display = '';
+  if (tableWrap) tableWrap.style.display = '';
+  if (footer) footer.style.display = 'flex';
+}
+
+async function loadMarketIntel() {
+  _marketIntelLoaded = true;
+  try {
+    const res = await API.get('/api/market-intelligence/status');
+    const d = (res && res.code === 200 && res.data) ? res.data : null;
+    const categories = (d && Array.isArray(d.categories)) ? d.categories : [];
+    const noticeEl = document.getElementById('marketIntelNotice');
+    if (noticeEl) noticeEl.textContent = (d && d.notice) ? d.notice : '';
+    const catSel = document.getElementById('marketCategorySelect');
+    if (catSel) {
+      catSel.innerHTML = categories.map(function (c) {
+        return '<option value="' + escapeAttr(c.key) + '">' + escapeHtml(c.name_zh || c.name_ru || c.key) + '</option>';
+      }).join('');
+    }
+  } catch (e) {
+    console.warn('[市场情报] status 加载失败:', e);
+  }
+  loadMarketIntelProducts();
+  loadMarketIntelKeywords();
+  loadMarketIntelSearchVisibility();
+}
+
+async function loadMarketIntelProducts() {
+  const grid = document.getElementById('marketIntelGrid');
+  if (!grid) return;
+  const category = document.getElementById('marketCategorySelect')?.value || 'home';
+  const ranking = document.getElementById('marketRankingSelect')?.value || 'hot';
+  grid.innerHTML = '<div style="padding:20px;color:#9ca3af;font-size:13px;grid-column:1/-1;">加载中...</div>';
+  try {
+    const res = await API.get('/api/market-intelligence/products', { ranking, category, period: 30, page: 1, page_size: 24 });
+    const d = (res && res.code === 200 && res.data) ? res.data : null;
+    const items = (d && d.items) || [];
+    if (!items.length) {
+      grid.innerHTML = '<div style="padding:30px;color:#9ca3af;font-size:13px;grid-column:1/-1;text-align:center;">' + ((d && d.notice) || '暂无市场数据') + '</div>';
+      return;
+    }
+    grid.innerHTML = items.map(function (p) {
+      const img = (p.image_url && p.image_url !== 'unknown') ? p.image_url : '';
+      const facts = p.facts || {};
+      const price = facts.ordered_amount_rub || '';
+      const sold = facts.ordered_units || '';
+      const fbs = (p.fbs_assessment && p.fbs_assessment.label) ? p.fbs_assessment.label : '';
+      const imgHtml = img
+        ? '<img src="' + escapeAttr(img) + '" alt="" loading="lazy" referrerpolicy="no-referrer" style="width:100%;height:100%;object-fit:cover;" onerror="this.remove();">'
+        : '<span style="color:#d1d5db;font-size:12px;">无图</span>';
+      let priceHtml = '';
+      if (price !== '') {
+        priceHtml = '<span style="font-size:13px;font-weight:700;color:#dc2626;">₽' + Number(price).toLocaleString('ru-RU') + '</span>';
+      }
+      let heatHtml = '';
+      if (typeof p.heat_index === 'number') {
+        heatHtml = '<div style="font-size:11px;color:#9ca3af;">热度 ' + p.heat_index + '</div>';
+      }
+      let fbsHtml = '';
+      if (fbs) {
+        fbsHtml = '<div style="font-size:11px;color:#6b7280;">FBS适配: ' + escapeHtml(fbs) + '</div>';
+      }
+      return ''
+        + '<div style="border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;background:#fff;display:flex;flex-direction:column;">'
+        + '<div style="height:140px;background:#f3f4f6;display:flex;align-items:center;justify-content:center;overflow:hidden;">' + imgHtml + '</div>'
+        + '<div style="padding:10px;display:flex;flex-direction:column;gap:6px;flex:1;">'
+        + '<div style="font-size:13px;font-weight:600;color:#111827;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:36px;" title="' + escapeAttr(p.title_ru || p.title_zh || '') + '">' + escapeHtml(p.title_ru || p.title_zh || '-') + '</div>'
+        + '<div style="display:flex;justify-content:space-between;align-items:center;">'
+        + '<span style="font-size:12px;color:#6b7280;">销量 ' + (sold === '' ? '-' : sold) + '</span>'
+        + priceHtml
+        + '</div>'
+        + heatHtml
+        + fbsHtml
+        + '</div>'
+        + '</div>';
+    }).join('');
+  } catch (e) {
+    console.warn('[市场情报] products 加载失败:', e);
+    grid.innerHTML = '<div style="padding:20px;color:#dc2626;font-size:13px;grid-column:1/-1;">市场数据加载失败</div>';
+  }
+}
+
+async function loadMarketIntelKeywords() {
+  const box = document.getElementById('marketIntelKeywords');
+  if (!box) return;
+  const category = document.getElementById('marketCategorySelect')?.value || '';
+  try {
+    const res = await API.get('/api/market-intelligence/keywords', { category, limit: 12 });
+    const d = (res && res.code === 200 && res.data) ? res.data : null;
+    const items = (d && d.items) || [];
+    if (!items.length) {
+      box.innerHTML = '<div style="font-size:13px;color:#9ca3af;">暂无关键词数据</div>';
+      return;
+    }
+    box.innerHTML = '<div style="font-weight:700;font-size:13px;margin-bottom:8px;color:#111827;">近7天热搜关键词</div><div>'
+      + items.map(function (k) {
+          const pop = (k.metrics && k.metrics.popularity != null) ? k.metrics.popularity : '';
+          const sub = pop !== '' ? ' <span style="color:#9ca3af;">' + pop + '</span>' : '';
+          return '<span style="display:inline-block;padding:4px 10px;margin:4px;border-radius:14px;background:#f3f4f6;font-size:12px;color:#111827;">'
+            + escapeHtml(k.keyword_ru || k.keyword || '')
+            + (k.keyword_zh ? ' <span style="color:#6b7280;">' + escapeHtml(k.keyword_zh) + '</span>' : '')
+            + sub
+            + '</span>';
+        }).join('')
+      + '</div>';
+  } catch (e) {
+    console.warn('[市场情报] keywords 加载失败:', e);
+    box.innerHTML = '<div style="font-size:13px;color:#dc2626;">关键词加载失败</div>';
+  }
+}
+
+async function loadMarketIntelSearchVisibility() {
+  const box = document.getElementById('marketIntelSearchVisibility');
+  if (!box) return;
+  try {
+    const res = await API.get('/api/market-intelligence/search-visibility/latest');
+    const d = (res && res.code === 200 && res.data) ? res.data : null;
+    if (!d || !d.available) {
+      box.innerHTML = '<div style="font-size:13px;color:#9ca3af;">' + ((d && d.notice) || '暂无搜索可见度方案（点击同步后生成）') + '</div>';
+      return;
+    }
+    const summary = d.summary || {};
+    const actions = d.actions || [];
+    // 汇总商品生成的关键词证据(top_queries)：取前 60 条去重
+    const seen = {};
+    const kwItems = [];
+    for (let i = 0; i < actions.length && kwItems.length < 60; i++) {
+      const ev = (actions[i] && actions[i].evidence) || {};
+      const rows = ev.top_queries || [];
+      for (let j = 0; j < rows.length && kwItems.length < 60; j++) {
+        const q = rows[j];
+        const key = String(q.query || '').toLowerCase();
+        if (!key || seen[key]) continue;
+        seen[key] = 1;
+        kwItems.push(q);
+      }
+    }
+    const head = '<div style="font-weight:700;font-size:13px;margin-bottom:8px;color:#111827;">搜索可见度关键词方案'
+      + ' <span style="color:#6b7280;font-weight:400;">(' + (summary.products || 0) + ' 个商品)</span></div>';
+    if (!kwItems.length) {
+      box.innerHTML = head + '<div style="font-size:13px;color:#9ca3af;">该方案暂无可展示的搜索词证据</div>';
+      return;
+    }
+    box.innerHTML = head + '<div>'
+      + kwItems.map(function (k) {
+          const imp = (k.impressions != null) ? k.impressions : ((k.metrics && k.metrics.impressions != null) ? k.metrics.impressions : '');
+          const sub = imp !== '' ? ' <span style="color:#9ca3af;">' + imp + '</span>' : '';
+          return '<span style="display:inline-block;padding:4px 10px;margin:4px;border-radius:14px;background:#eef2ff;font-size:12px;color:#111827;">'
+            + escapeHtml(k.query || '') + sub
+            + '</span>';
+        }).join('')
+      + '</div>';
+  } catch (e) {
+    console.warn('[市场情报] search-visibility 加载失败:', e);
+    box.innerHTML = '<div style="font-size:13px;color:#dc2626;">搜索可见度方案加载失败</div>';
+  }
 }
 
 // ===== 初始化 =====

@@ -45,14 +45,10 @@ function renderFinancePage() {
           <select class="form-select" style="width:auto;height:30px;font-size:12px;"
                   onchange="financeState.parentType=this.value;financeState.page=1;loadFinTransactions()">
             <option value="">全部大类</option>
-            <option value="Marketplace">平台结算</option>
-            <option value="Payout">打款</option>
-            <option value="Refund">退款</option>
-            <option value="Chargeback">拒付</option>
-            <option value="Service">服务费</option>
-            <option value="Compensation">赔付</option>
-            <option value="LogisticServices">物流服务</option>
-            <option value="Promo">推广</option>
+            <option value="POSTING">订单入账</option>
+            <option value="ITEM">商品费用</option>
+            <option value="NON_ITEM">服务费</option>
+            <option value="UNSPECIFIED">其他</option>
           </select>
         </div>
         <div id="finTxnBody"><div style="text-align:center;padding:30px;color:var(--text-tertiary);">加载中...</div></div>
@@ -201,35 +197,16 @@ async function financeSyncAll() {
   const btn = document.getElementById('finCenterSyncBtn');
   if (btn) { btn.disabled = true; btn.textContent = '同步中...'; }
   try {
-    const resp = await API.post('/api/finance/sync', {});
-    showFinanceSyncResult(resp);
+    const body = { days: financeState.days };
+    if (financeState.storeId) body.store_id = financeState.storeId;
+    const resp = await API.post('/api/finance/sync', body);
+    window.Toast && Toast.show(resp.msg || '同步完成', 'success');
   } catch (e) {
     window.Toast && Toast.show('同步失败: ' + (e.message || e), 'error');
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = '<i data-lucide="refresh-cw" style="width:14px;height:14px;"></i> 同步财务明细'; if (window.lucide) lucide.createIcons(); }
     await loadFinanceCenter();
   }
-}
-
-/**
- * 按同步结果选择提示级别。
- *
- * 【为什么需要这个】此前这里写死 Toast.show(msg, 'success')，于是后端返回
- * 「同步完成：成功 0 店，失败 1 店」时，界面照样弹一个绿色对勾 —— 自相矛盾，
- * 也掩盖了「一家店都没同步上」这个事实。现在按实际结果分级：
- *   接口失败 / 全店失败 → error；部分失败 → warning；全部成功 → success
- */
-function showFinanceSyncResult(resp) {
-  if (!window.Toast) return;
-  const code = resp && resp.code;
-  const msg = (resp && resp.msg) || '同步完成';
-  if (code !== 200) { Toast.show(msg, 'error'); return; }
-  const d = (resp && resp.data) || {};
-  const ok = Number(d.ok || 0);
-  const failed = Number(d.failed || 0);
-  if (failed > 0 && ok === 0) Toast.show(msg, 'error');
-  else if (failed > 0) Toast.show(msg, 'warning');
-  else Toast.show(msg, 'success');
 }
 
 // 路由自注册

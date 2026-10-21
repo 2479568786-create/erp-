@@ -15,7 +15,8 @@ from utils.security import decrypt_secret
 seller_insights_bp = Blueprint('seller_insights', __name__)
 OZON_ANALYTICS_URL = 'https://api-seller.ozon.ru/v1/analytics/data'
 METRIC_KEYS = {
-    'session_view_pdp', 'hits_view_pdp', 'hits_tocart_pdp', 'conv_tocart_pdp', 'ordered_units', 'revenue',
+    'hits_view_search', 'hits_view_pdp', 'hits_tocart_pdp',
+    'ordered_units', 'revenue', 'cancellations', 'returns', 'position_category',
 }
 
 
@@ -187,19 +188,33 @@ def get_seller_insights():
             if sku.isdigit() and title:
                 products[sku] = {'title': title, 'image': ''}
     if sku_ids:
-        placeholders = ','.join('?' for _ in sku_ids)
         conn = get_connection()
         try:
             product_rows = conn.execute(
-                f"SELECT sku, sku_id, title, image FROM online_products WHERE store_id = ? AND (sku_id IN ({placeholders}) OR sku IN ({placeholders}))",
-                [store['id'], *sku_ids, *sku_ids],
+                "SELECT sku, sku_id, ozon_offer_id, title, image FROM online_products WHERE store_id = ?",
+                (store['id'],),
             ).fetchall()
+            products_by_id = {}
+            products_by_title = {}
             for product in product_rows:
                 for key in (product['sku_id'], product['sku']):
                     if key:
-                        products[str(key)] = {
+                        products_by_id[str(key)] = product
+                title = str(product['title'] or '').strip()
+                if title:
+                    products_by_title[title] = product
+
+            for row in rows:
+                for item in row.get('dimensions') or []:
+                    sku = str(item.get('id') or '')
+                    if not sku.isdigit():
+                        continue
+                    product = products_by_id.get(sku) or products_by_title.get(str(item.get('name') or '').strip())
+                    if product:
+                        products[sku] = {
                             'title': product['title'],
                             'image': product['image'],
+                            'offerId': product['ozon_offer_id'] or product['sku'],
                         }
         finally:
             conn.close()
@@ -208,6 +223,7 @@ def get_seller_insights():
         'store': store.get('alias') or store.get('store_id'),
         'dateFrom': date_from,
         'dateTo': date_to,
+        'dimension': payload['dimension'],
         'metrics': metrics,
         'totals': report.get('totals') or [],
         'rows': rows,

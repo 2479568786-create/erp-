@@ -1,37 +1,18 @@
 """
 OZON ERP - 财务服务
-1. 从 Ozon 应计明细接口逐笔同步费用（按店增量，幂等落库）
+1. 从 Ozon /v1/finance/accrual/by-day 逐笔同步财务明细（按店增量，幂等落库）
 2. 中控大屏聚合：营业额 / 各店营收条 / 今日取消退货 / 财务大类明细 / 上架人员业绩榜
-
-【数据源迁移说明 · 2026-09-13】
-Ozon 已于 **2026-09-08 停用** /v3/finance/transaction/list 与 /v3/finance/transaction/totals，
-继续调用会返回：obsolete method cannot be used（表现为「同步失败」）。
-现改用官方替代接口 POST /v1/finance/accrual/by-day：
-  · 该接口**一次只接受单日**（Date 必须 10 位 YYYY-MM-DD），没有区间参数 → 必须按天循环
-  · 金额字段由 amount 变为 total_amount.amount
-  · 费用细项藏在 item_fees / non_item_fee / container_fees 里，靠 type_id 区分费用类型
-  · type_id 需配合 /v1/finance/accrual/types 字典才能翻译成可读名称
 """
-import time
 from datetime import datetime, timedelta
 
-from db import query, execute, execute_many
+from db import query, execute
 from models.order import Order
 from models.account import Store
 from models.product import PublishRecord
 from services.ozon_api import (
-    _get_store_credentials,
-    list_finance_transactions,
-    get_finance_accruals_by_day,
+    _get_store_credentials, get_finance_accruals_by_day,
     get_finance_accrual_types,
 )
-
-# 首次同步回溯天数。新接口按天拉取，首次全量会调用 N 次；之后走水位增量。
-FIRST_SYNC_DAYS = 30
-# 逐日调用之间的间隔（秒），给 Ozon 的每秒请求限制留余量
-DAY_CALL_DELAY = 0.15
-# 单日最大翻页次数（防死循环）
-MAX_PAGES_PER_DAY = 50
 
 # 已付款订单状态（营业额口径，与 AI 询盘助手保持一致）
 PAID_STATUSES = (
@@ -49,8 +30,12 @@ RETURN_STATUSES = (
     'client_returned_unknown', 'not_accepted',
 )
 
-# Ozon 财务大类（v3 接口的 type 字段，及 v2 旧值兼容） → 中文标签
+# Ozon 财务大类（新版 accrual 分类及旧接口值兼容） → 中文标签
 PARENT_TYPE_LABELS = {
+    'POSTING': '订单入账',
+    'ITEM': '商品费用',
+    'NON_ITEM': '服务费',
+    'UNSPECIFIED': '其他',
     # v3 type 值（当前接口）
     'orders': '订单入账',
     'returns': '退货/取消',
@@ -72,56 +57,6 @@ PARENT_TYPE_LABELS = {
     'LogisticServices': '物流服务',
     'SaleFinishedMarketplace': '交易完成结算',
     'Promo': '推广',
-    # ===== 新应计接口（/v1/finance/accrual/*）的类型名 → 中文 =====
-    # 应计明细的 operation_parent_type 直接存 accrual type 的 name（英文机器名），
-    # 这里做中文映射；未收录的会兜底显示原始英文名，不影响使用。
-    'Acquiring': '收单手续费',
-    'BackwardShipment': '返程干线',
-    'BrandCommission': '品牌推广佣金',
-    'BrandPromotion': '品牌推广开通',
-    'BrandShelf': '品牌货架',
-    'Cancellation': '取消订单处理',
-    'Charity': '慈善捐赠',
-    'ClaimCommission': '索赔处理',
-    'ClientReturn': '退货处理',
-    'Compensation': '补偿/赔付',
-    'CorrectionCommission': '往来对账调整',
-    'CrossDock': '越库操作',
-    'CrossDockPickUpCourierDelivery': '上门取件安排',
-    'DefectRate': '卖家操作失误处理',
-    'Disposal': '商品销毁',
-    'Drop-Off': 'Drop-off 发货处理',
-    'Drop-Off Agent': '合作方 Drop-off 处理',
-    'EarlyPayment': '提前付款',
-    'ExternalPromotion': '站外推广',
-    'FlexiblePayments': '灵活付款',
-    'Fulfillment': '订单装配',
-    'Installment': '分期付款',
-    'InternetSiteAdvertising': '站内网络广告',
-    'ItemCloning': '商品卡迁移',
-    'ItemCompensation': '商品补偿',
-    'KazakhstanBuyerInstallment': '哈萨克买家分期',
-    'LabelOriginal': '正品标识',
-    'LastMile': '最后一公里',
-    'LastMileCourier': '送货上门',
-    'LastMilePickUpPoint': '自提点发货',
-    'LeadGeneration': '线索获取',
-    'Logistic': '物流费',
-    'Marketing': '广告服务费',
-    'Marking': '强制标记费',
-    'Moderation': '商品审核',
-    'OrdersBooking': '预订订单引入',
-    'OzonData': 'Ozon Data',
-    'PackageCost': '包装材料费',
-    'PackingFee': '合作方包装费',
-    'PartialReturn': '部分退货处理',
-    'PlacementInTop': '登上顶端',
-    'Premium': 'Premium 服务',
-    'Promotion': '推广服务',
-    'ServiceFee': '服务费',
-    'ShelfSpace': '货架位',
-    'Storage': '仓储费',
-    'Utilization': '资源使用费',
 }
 
 
@@ -155,123 +90,15 @@ def _month_slices(date_from, date_to):
     return slices
 
 
-# ============================================================
-# 应计明细解析（新接口 /v1/finance/accrual/by-day）
-# ============================================================
-
-def _as_list(block):
-    """把 Ozon 的费用块规整成 dict 列表（可能是 None / dict / {fees:[...]} / list）。"""
-    if not block:
-        return []
-    if isinstance(block, list):
-        return [x for x in block if isinstance(x, dict)]
-    if isinstance(block, dict):
-        inner = block.get('fees')
-        if isinstance(inner, list):
-            return [x for x in inner if isinstance(x, dict)]
-        return [block]
-    return []
-
-
-def _amount(obj) -> float:
-    """取金额：支持 {"amount": "-16.66"} 与裸数字/字符串。"""
-    if isinstance(obj, dict):
-        obj = obj.get('amount')
-    try:
-        return float(obj or 0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _fee_entries(accrual) -> list:
-    """把一条应计记录拆成若干「费用」条目。
-
-    一条 accrual 可能同时含多类费用：
-      item_fees.fees[] -> 每个 SKU 下再有 fees[]（type_id + accrued）
-      non_item_fee     -> 非商品费用
-      container_fees   -> 包装容器费
-    必须拆开才能按费用类型分别统计（财务中心「财务大类明细」要的就是这个粒度）。
-    """
-    out = []
-    for sku_block in _as_list(accrual.get('item_fees')):
-        sku = sku_block.get('sku')
-        for fee in _as_list(sku_block):
-            out.append({'type_id': fee.get('type_id'),
-                        'amount': _amount(fee.get('accrued')),
-                        'sku': sku, 'payload': fee})
-    for key in ('non_item_fee', 'container_fees'):
-        for fee in _as_list(accrual.get(key)):
-            out.append({'type_id': fee.get('type_id'),
-                        'amount': _amount(fee.get('accrued')),
-                        'sku': None, 'payload': fee})
-    if not out:
-        # 兜底：没有细项时退化为整条总额，避免整笔漏记
-        out.append({'type_id': None, 'amount': _amount(accrual.get('total_amount')),
-                    'sku': None, 'payload': accrual})
-    return out
-
-
-def accrual_type_map(client_id=None, api_key=None, refresh=False) -> dict:
-    """type_id -> {name, description}；优先读本地字典表，缺失时向 Ozon 拉取并缓存。"""
-    rows = query('SELECT type_id, name, description FROM finance_accrual_types')
-    if rows and not refresh:
-        return {r['type_id']: r for r in rows}
-    try:
-        resp = get_finance_accrual_types(client_id, api_key)
-        items = (resp or {}).get('accrual_types') or []
-    except Exception:  # noqa: BLE001 —— 字典拉不到不阻断主流程，退回旧缓存
-        return {r['type_id']: r for r in rows} if rows else {}
-    payload = [(int(t.get('id')), t.get('name') or '', t.get('description') or '')
-               for t in items if t.get('id') is not None]
-    if payload:
-        execute_many(
-            'INSERT INTO finance_accrual_types (type_id, name, description, synced_at)'
-            " VALUES (?, ?, ?, datetime('now'))"
-            ' ON CONFLICT(type_id) DO UPDATE SET name=excluded.name,'
-            ' description=excluded.description, synced_at=excluded.synced_at',
-            payload,
-        )
-    return {int(t.get('id')): {'type_id': int(t.get('id')),
-                               'name': t.get('name') or '',
-                               'description': t.get('description') or ''}
-            for t in items if t.get('id') is not None}
-
-
-def _save_accrual(store_id, accrual, type_map) -> None:
-    """把一条应计记录按费用项落库（operation_id 确定性生成，配合唯一索引幂等）。"""
-    accrual_id = str(accrual.get('accrual_id') or '')
-    stat_date = str(accrual.get('date') or '')
-    posting = str(accrual.get('posting') or '') or str(accrual.get('unit_number') or '')
-    category = str(accrual.get('accrued_category') or '')
-    for idx, fee in enumerate(_fee_entries(accrual)):
-        type_id = fee['type_id']
-        info = type_map.get(type_id) if type_id is not None else None
-        type_name = (info or {}).get('name') or category or 'Unknown'
-        op_id = '%s:%s:%s:%s' % (accrual_id, type_id, fee['sku'] or '-', idx)
-        execute(
-            'INSERT OR IGNORE INTO finance_transactions'
-            ' (store_id, operation_id, operation_type, operation_type_name,'
-            '  operation_parent_type, operation_date, posting_number,'
-            '  amount, payout, items_json, raw_json)'
-            ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (store_id, op_id, type_name, (info or {}).get('description') or '',
-             type_name, stat_date, posting, fee['amount'], None,
-             _dumps(fee['payload']), _dumps(accrual)),
-        )
-
-
-def sync_store_transactions(store_id, date_from=None, date_to=None):
-    """同步单个店铺的财务应计明细（增量，按 finance_sync_state 水位）
-
-    数据源：POST /v1/finance/accrual/by-day（旧 /v3/finance/transaction/list 已停用）。
-    该接口一次只给一天，因此这里按天循环；水位机制保证日常只补跑新发生的日期。
+def sync_store_transactions(store_id, date_from=None, date_to=None, initial_days=90):
+    """同步单个店铺的财务交易明细（增量，按 finance_sync_state 水位）
 
     Args:
         store_id: Ozon 店铺 ID（字符串）
-        date_from/date_to: 'YYYY-MM-DD'；不传则从水位续拉，首次回溯 FIRST_SYNC_DAYS 天
+        date_from/date_to: 'YYYY-MM-DD'；不传则从水位续拉，首次拉最近 90 天
 
     Returns:
-        dict: {store_id, saved, total, days, from, to, error?}
+        dict: {store_id, saved, total, from, to, error?}
     """
     today = datetime.now().strftime('%Y-%m-%d')
     state = query(
@@ -280,64 +107,80 @@ def sync_store_transactions(store_id, date_from=None, date_to=None):
 
     if not date_from:
         if state and state['last_to']:
-            # 从上次水位当日续拉（重叠 1 天靠唯一索引去重）
+            # 从上次水位次日续拉（重叠 1 天靠唯一索引去重）
             last = datetime.strptime(state['last_to'], '%Y-%m-%d')
-            date_from = last.strftime('%Y-%m-%d')
+            date_from = (last - timedelta(days=1)).strftime('%Y-%m-%d')
         else:
-            date_from = (datetime.now() - timedelta(days=FIRST_SYNC_DAYS)).strftime('%Y-%m-%d')
+            date_from = (datetime.now() - timedelta(days=initial_days)).strftime('%Y-%m-%d')
     if not date_to:
         date_to = today
 
     client_id, api_key = _get_store_credentials(store_id)
     if not client_id or not api_key:
-        return {'store_id': store_id, 'saved': 0, 'total': 0, 'days': 0,
+        return {'store_id': store_id, 'saved': 0, 'total': 0,
                 'from': date_from, 'to': date_to, 'error': '店铺凭证不存在或未配置'}
-
-    type_map = accrual_type_map(client_id, api_key)
-    before = query('SELECT COUNT(*) AS c FROM finance_transactions WHERE store_id = ?',
-                   (store_id,), one=True)
-    before_c = int((before or {}).get('c') or 0)
+    saved = 0
     total = 0
-    days = 0
     try:
+        types = get_finance_accrual_types(client_id, api_key).get('accrual_types') or []
+        type_names = {str(t.get('id')): t.get('name', '') for t in types}
         cur = datetime.strptime(date_from, '%Y-%m-%d')
         end = datetime.strptime(date_to, '%Y-%m-%d')
         while cur <= end:
             day = cur.strftime('%Y-%m-%d')
             last_id = ''
-            pages = 0
-            while pages < MAX_PAGES_PER_DAY:
+            for _ in range(200):
                 resp = get_finance_accruals_by_day(day, client_id, api_key, last_id)
                 accruals = (resp or {}).get('accruals') or []
-                for acc in accruals:
-                    if isinstance(acc, dict):
-                        _save_accrual(store_id, acc, type_map)
-                total += len(accruals)
-                last_id = str((resp or {}).get('last_id') or '')
-                pages += 1
-                if not last_id:
+                if not accruals:
                     break
-            days += 1
+                for op in accruals:
+                    nested = op.get('non_item_fee') or {}
+                    type_id = nested.get('type_id')
+                    if type_id is None:
+                        type_id = op.get('type_id')
+                    amount = (op.get('total_amount') or {}).get('amount') or 0
+                    execute(
+                        """INSERT OR IGNORE INTO finance_transactions
+                           (store_id, operation_id, operation_type, operation_type_name,
+                            operation_parent_type, operation_date, posting_number,
+                            amount, payout, items_json, raw_json)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            store_id, str(op.get('accrual_id', '')),
+                            str(type_id or ''), type_names.get(str(type_id), ''),
+                            op.get('accrued_category') or 'UNSPECIFIED',
+                            op.get('date') or day, op.get('unit_number') or '',
+                            float(amount), None, _dumps(op), _dumps(op),
+                        ),
+                    )
+                    saved += 1
+                total += len(accruals)
+                next_id = resp.get('last_id') or ''
+                if not next_id or next_id == last_id:
+                    break
+                last_id = next_id
+            else:
+                raise RuntimeError(f'{day} 财务分页超过 200 页，已停止以避免漏数据')
             cur += timedelta(days=1)
-            time.sleep(DAY_CALL_DELAY)
     except Exception as exc:  # noqa: BLE001 —— 单店失败不影响其他店
-        return {'store_id': store_id, 'saved': 0, 'total': total, 'days': days,
+        return {'store_id': store_id, 'saved': saved, 'total': total,
                 'from': date_from, 'to': date_to, 'error': str(exc)}
 
-    after = query('SELECT COUNT(*) AS c FROM finance_transactions WHERE store_id = ?',
-                  (store_id,), one=True)
-    after_c = int((after or {}).get('c') or 0)
-    saved = max(0, after_c - before_c)   # 唯一索引去重后的真实新增条数
-    execute(
-        'INSERT INTO finance_sync_state (store_id, last_to, synced_at, transaction_count)'
-        " VALUES (?, ?, datetime('now'), ?)"
-        ' ON CONFLICT(store_id) DO UPDATE SET'
-        '   last_to = excluded.last_to,'
-        '   synced_at = excluded.synced_at,'
-        '   transaction_count = excluded.transaction_count',
-        (store_id, date_to, after_c),
+    count_row = query(
+        "SELECT COUNT(*) AS c FROM finance_transactions WHERE store_id = ?",
+        (store_id,), one=True,
     )
-    return {'store_id': store_id, 'saved': saved, 'total': total, 'days': days,
+    execute(
+        """INSERT INTO finance_sync_state (store_id, last_to, synced_at, transaction_count)
+           VALUES (?, ?, datetime('now'), ?)
+           ON CONFLICT(store_id) DO UPDATE SET
+             last_to = excluded.last_to,
+             synced_at = excluded.synced_at,
+             transaction_count = excluded.transaction_count""",
+        (store_id, date_to, count_row['c'] if count_row else 0),
+    )
+    return {'store_id': store_id, 'saved': saved, 'total': total,
             'from': date_from, 'to': date_to}
 
 
@@ -350,15 +193,15 @@ def _dumps(obj):
 
 
 def sync_all_stores(days=90, store_ids=None):
-    """遍历凭证有效的店铺同步财务明细；store_ids 提供时仅同步这些店铺"""
+    """遍历所有凭证有效的店铺同步财务明细"""
     stores = Store.find_all(auth_status='active') or []
     if store_ids is not None:
-        wanted = {str(x) for x in store_ids}
-        stores = [s for s in stores if str(s['store_id']) in wanted]
+        allowed = {str(store_id) for store_id in store_ids}
+        stores = [store for store in stores if str(store.get('store_id')) in allowed]
     results = []
     for s in stores:
         sid = str(s['store_id'])
-        r = sync_store_transactions(sid)
+        r = sync_store_transactions(sid, initial_days=days)
         r['alias'] = s.get('alias') or sid
         results.append(r)
     return {'stores': results,

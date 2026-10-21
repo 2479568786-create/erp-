@@ -82,41 +82,22 @@ def finance_transactions():
 @handle_errors
 @require_login
 def finance_sync():
-    """触发财务交易明细同步。body: {store_id?: str}，不传则同步当前用户可见店铺（管理员=全部）"""
+    """同步当前账号可见店铺的财务明细。"""
     from services import finance_service
     body = request.get_json(silent=True) or {}
     store_id = body.get('store_id')
-    visible = _visible_ids()
+    user = get_current_user()
+    visible_ids = visible_ozon_store_ids(user)
+    try:
+        days = max(1, min(int(body.get('days', 90)), 365))
+    except (TypeError, ValueError):
+        days = 90
     if store_id:
-        if visible is not None and str(store_id) not in [str(x) for x in visible]:
-            return error_response('无权限同步该店铺', 403)
-        result = finance_service.sync_store_transactions(str(store_id))
+        if visible_ids is not None and str(store_id) not in visible_ids:
+            return error_response('无权同步该店铺', 403)
+        result = finance_service.sync_store_transactions(str(store_id), initial_days=days)
         if result.get('error'):
-            # 单店失败就是失败，不能返回 200 让前端弹「成功」
             return error_response(f"店铺 {result['store_id']} 同步失败: {result['error']}", 500)
-        return success_response(
-            result,
-            msg='同步完成：新增 %d 条明细（回溯 %d 天）' % (result.get('saved', 0),
-                                                          result.get('days', 0)))
-
-    summary = finance_service.sync_all_stores(store_ids=visible)
-    stores = summary.get('stores') or []
-    ok, failed = int(summary.get('ok') or 0), int(summary.get('failed') or 0)
-
-    if not stores:
-        return error_response('没有可同步的店铺（请先添加店铺并确认授权状态为「已授权」）', 400)
-
-    if ok == 0:
-        # 全部失败：这是失败，绝不能再返回 200 让前端弹绿勾
-        reasons = '；'.join(
-            '%s：%s' % (s.get('alias') or s.get('store_id'), s.get('error') or '未知原因')
-            for s in stores if s.get('error')) or '未知原因'
-        return error_response('财务同步失败（%d 家店铺全部同步失败）— %s' % (failed, reasons[:400]), 500)
-
-    if failed:
-        # 部分成功：用 warning 语义提示，让人注意到有店没同步上
-        return success_response(
-            summary,
-            msg='同步完成：成功 %d 店，失败 %d 店（部分店铺未同步成功，请查看详情）' % (ok, failed))
-
-    return success_response(summary, msg='同步完成：%d 家店铺全部成功' % ok)
+        return success_response(result, msg='同步完成')
+    summary = finance_service.sync_all_stores(days=days, store_ids=visible_ids)
+    return success_response(summary, msg=f"同步完成：成功 {summary['ok']} 店，失败 {summary['failed']} 店")

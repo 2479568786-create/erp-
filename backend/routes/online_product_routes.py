@@ -135,10 +135,13 @@ def list_online_products():
 def get_online_product_stats():
     """各状态统计（业务员仅统计自己的店铺）"""
     user = get_current_user()
+    store_id = request.args.get('storeId', '').strip()
     if user.get('role') == 'admin':
-        stats = OnlineProduct.get_stats()
+        stats = OnlineProduct.get_stats(store_ids=[store_id]) if store_id else OnlineProduct.get_stats()
     else:
         visible = visible_store_pks(user) or []
+        if store_id:
+            visible = [sid for sid in visible if str(sid) == store_id]
         stats = OnlineProduct.get_stats(store_ids=visible) if visible else _empty_stats()
     return success_response(data=stats)
 
@@ -469,16 +472,21 @@ def get_online_product_edit_data(item_id):
 @require_login
 def save_online_product_edit_data(item_id):
     online_item = OnlineProduct.find_by_id(item_id)
-    _ensure_online_visible(get_current_user(), item)
+    _ensure_online_visible(get_current_user(), online_item)
     if not online_item:
         return error_response('在线商品不存在', 404)
     product = request.get_json(silent=True) or {}
     expected_offer = str(online_item.get('ozonOfferId') or online_item.get('sku') or '')
     submitted = product.get('skus') or []
-    offers = {str(s.get('offerId') or s.get('skuCode') or '') for s in submitted if isinstance(s, dict)}
-    offers.discard('')
-    if offers and offers != {expected_offer}:
-        return error_response('在线编辑只能更新原 offer_id，不能新增或替换 SKU', 400)
+    if not expected_offer:
+        return error_response('在线商品缺少原 offer_id，无法安全更新', 400)
+    if len(submitted) != 1 or not isinstance(submitted[0], dict):
+        return error_response('在线商品编辑当前仅允许更新当前 SKU', 400)
+    # The listing record is authoritative: editor-side SKU fields can be
+    # regenerated while collecting the form, but must never change Ozon identity.
+    submitted[0]['skuCode'] = expected_offer
+    submitted[0]['offerId'] = expected_offer
+    submitted[0]['offer_id'] = expected_offer
     product['offerId'] = expected_offer
     product['storeId'] = online_item.get('storeId')
     product['ozonProductId'] = online_item.get('ozonProductId')
@@ -486,6 +494,10 @@ def save_online_product_edit_data(item_id):
     if not client_id:
         return error_response('未配置 Ozon API 凭证', 401)
     try:
+        from services.publish_service import preprocess_images_for_publish
+        images_ok, image_errors = preprocess_images_for_publish(product)
+        if not images_ok:
+            return error_response('Ozon 更新图片预处理失败: ' + '; '.join(image_errors[:5]), 502)
         items = build_ozon_product_items(product, store_id=online_item.get('storeId'), publish_mode='merge')
         if len(items) != 1:
             return error_response('在线商品编辑当前仅允许更新当前 SKU', 400)
@@ -493,12 +505,16 @@ def save_online_product_edit_data(item_id):
     except (OzonAPIError, ValueError) as e:
         message = e.message if isinstance(e, OzonAPIError) else str(e)
         return error_response(f'Ozon 更新失败: {message}', getattr(e, 'status_code', None) or 502)
+    OnlineProduct.update(item_id, {
+        'sourceLink': product.get('sourceLink') or '',
+        'sourceName': product.get('sourceName') or '',
+    })
     return success_response(data={'taskId': (result.get('result') or {}).get('task_id'), 'ozon': result}, msg='已提交 Ozon 更新')
 
 
 @online_product_bp.route('/online-products/sync', methods=['POST'])
 @handle_errors
-@require_admin
+@require_login
 def sync_online_products():
     """全量同步店铺商品（从 Ozon 拉取并 upsert 到本地）
 
@@ -519,10 +535,19 @@ def sync_online_products():
     store_id = (data.get('storeId') or '').strip() or None
     status_filter = (data.get('statusFilter') or '').strip() or None
     limit = data.get('limit')
+    user = get_current_user()
+
+    if user.get('role') != 'admin':
+        visible_pks = {str(pk) for pk in (visible_store_pks(user) or [])}
+        if not store_id:
+            stores = Store.find_all(account_id=user['id'], auth_status='active') or []
+            store_id = str(stores[0]['id']) if stores else None
 
     client_id, api_key, store_name, store_pk = _get_store_info(store_id)
     if not client_id:
         return error_response("未配置 Ozon API 凭证，请先在店铺管理中添加 API Key", 401)
+    if user.get('role') != 'admin' and str(store_pk) not in visible_pks:
+        return error_response('无权同步该店铺', 403)
 
     # 1. 拉取商品 ID 列表
     try:

@@ -128,6 +128,7 @@ _color_cache_lock = threading.Lock()
 
 # 通用颜色映射（中文→俄语）从通用层导入，便于统一维护
 from data.category_mapping_general import translate_color_to_ru as _translate_color_to_ru
+from utils.image_proxy import is_public_ozon_image_url
 
 
 def _download_and_save_image(img_url):
@@ -154,7 +155,7 @@ def _download_and_save_image(img_url):
     try:
         req = urllib.request.Request(img_url)
         req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-        req.add_header('Referer', 'https://detail.1688.com/')
+        req.add_header('Referer', 'https://www.ozon.ru/' if is_public_ozon_image_url(img_url) else 'https://detail.1688.com/')
         req.add_header('Accept', 'image/webp,image/apng,image/*,*/*;q=0.8')
 
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -258,6 +259,27 @@ def preprocess_images_for_publish(product):
                 return new_url
             return None
 
+        # 图库图片保存在 DATA_DIR/gallery，发布时转存为 Ozon 可访问的上传图片。
+        gallery_path = urllib.parse.urlparse(url).path
+        gallery_prefix = '/api/gallery/files/'
+        if gallery_path.startswith(gallery_prefix):
+            filename = os.path.basename(gallery_path[len(gallery_prefix):])
+            gallery_file = os.path.join(os.path.dirname(Config.PRODUCTS_FILE), 'gallery', filename)
+            if not filename or not os.path.isfile(gallery_file):
+                return ('__ERROR__', f'图库图片不存在: {filename or url[:60]}')
+            ext = os.path.splitext(filename)[1].lower().lstrip('.')
+            if ext not in {'png', 'jpg', 'jpeg', 'webp'}:
+                return ('__ERROR__', f'图库图片格式不支持: {ext or "未知"}')
+            try:
+                with open(gallery_file, 'rb') as image_file:
+                    image_data = image_file.read(Config.MAX_IMAGE_SIZE + 1)
+                if len(image_data) > Config.MAX_IMAGE_SIZE:
+                    return ('__ERROR__', '图片大小超过限制')
+                from services.storage_service import save_image
+                return save_image(image_data, ext)
+            except OSError as e:
+                return ('__ERROR__', f'读取图库图片失败: {e}')
+
         # 已是本地托管的图片：补全 URL
         if url.startswith('/uploads/'):
             return f'{base_url}{url}'
@@ -286,25 +308,6 @@ def preprocess_images_for_publish(product):
                 return new_url
             return url
 
-        # 图库图片：/api/gallery/files/<filename> → 读取图库文件转存到 uploads
-        if url.startswith('/api/gallery/files/'):
-            try:
-                from config import DATA_DIR
-                _gdir = os.path.join(DATA_DIR, 'gallery')
-                _fname = os.path.basename(url.split('/api/gallery/files/')[-1])
-                _gpath = os.path.join(_gdir, _fname)
-                if not os.path.isfile(_gpath):
-                    return ('__ERROR__', f'图库文件不存在: {_fname}')
-                with open(_gpath, 'rb') as _gf:
-                    image_data = _gf.read()
-                _ext = os.path.splitext(_fname)[1].lstrip('.').lower() or 'png'
-                if _ext not in ('jpg', 'jpeg', 'png', 'webp', 'gif'):
-                    _ext = 'png'
-                from services.storage_service import save_image
-                return save_image(image_data, _ext)
-            except Exception as e:
-                return ('__ERROR__', f'图库图片转存失败: {e}')
-
         # 其他格式（相对路径等）
         return ('__ERROR__', f'不支持的图片格式: {url[:60]}')
 
@@ -328,7 +331,7 @@ def preprocess_images_for_publish(product):
         combo = sku.get('combo') or {}
         for val in combo.values():
             if isinstance(val, str) and val:
-                if val.startswith(('http://', 'https://', 'data:', '/api/image_proxy', '/uploads/', '/api/gallery/files/')):
+                if val.startswith(('http://', 'https://', 'data:', '/api/image_proxy', '/uploads/')):
                     all_urls.add(val)
     # 详情图
     for img in product.get('detailImages', []) or []:
@@ -1666,17 +1669,29 @@ def build_ozon_skus(skus, sku_attrs, product=None):
                     sku_attr_list.append(color_attr_item)
                 elif attr_def.get('skuType') == 'select' and dictionary_id:
                     # 销售属性（有字典，如尺码/尺寸等）：需要查找 dictionary_value_id
-                    # 复用 _find_color_id 的字典查找逻辑（该函数适用于任何字典属性）
-                    dict_value_id = _find_color_id(
-                        attr_value,
-                        description_category_id=(product or {}).get('descriptionCategoryId'),
-                        type_id=(product or {}).get('typeId'),
-                        attribute_id=attr_id,
-                        dictionary_id=dictionary_id,
-                    )
+                    # 优先使用编辑页选择字典值时保存的 ID，避免重新按展示文本模糊匹配。
+                    definition_values = attr_def.get('values') or []
+                    definition_ids = attr_def.get('valueIds') or []
+                    try:
+                        value_index = definition_values.index(attr_value)
+                    except ValueError:
+                        value_index = -1
+                    stored_id = definition_ids[value_index] if 0 <= value_index < len(definition_ids) else None
+                    dict_value_ids = stored_id if isinstance(stored_id, list) else ([stored_id] if stored_id else [])
+                    if not dict_value_ids:
+                        # 历史草稿可能只有中俄双语展示文本，没有保存字典 ID。
+                        matched_id = _find_color_id(
+                            attr_value,
+                            description_category_id=(product or {}).get('descriptionCategoryId'),
+                            type_id=(product or {}).get('typeId'),
+                            attribute_id=attr_id,
+                            dictionary_id=dictionary_id,
+                        )
+                        if matched_id:
+                            dict_value_ids = [matched_id]
                     sku_attr_list.append({
                         'id': attr_id,
-                        'values': [{'dictionary_value_id': dict_value_id}] if dict_value_id
+                        'values': [{'dictionary_value_id': vid} for vid in dict_value_ids] if dict_value_ids
                                    else [{'value': str(attr_value)}],
                     })
                 else:
@@ -1735,8 +1750,11 @@ def _find_color_id(color_name, description_category_id=None, type_id=None,
     if not color_name or not description_category_id or not type_id or not attribute_id:
         return None
 
-    # 清理颜色名：去除括号内的俄语部分，取中文部分
+    # 先按完整双语值里的俄语别名查找，再回退到中文展示名。
     clean_name = color_name.split('（')[0].split('(')[0].strip().lower()
+    bracket_match = re.search(r'[（(]([^）)]+)[）)]', str(color_name))
+    aliases = [bracket_match.group(1).strip().lower()] if bracket_match else []
+    aliases.append(clean_name)
 
     cache_key = (description_category_id, type_id, attribute_id)
 
@@ -1745,9 +1763,10 @@ def _find_color_id(color_name, description_category_id=None, type_id=None,
         cached_values = _color_cache.get(cache_key)
         if cached_values:
             # 精确匹配（忽略大小写）
-            for name, did in cached_values.items():
-                if name.lower() == clean_name:
-                    return did
+            for alias in aliases:
+                for name, did in cached_values.items():
+                    if name.lower() == alias:
+                        return did
             # 模糊匹配：颜色名包含缓存中的关键词
             for name, did in cached_values.items():
                 if clean_name in name.lower() or name.lower() in clean_name:
@@ -1784,9 +1803,10 @@ def _find_color_id(color_name, description_category_id=None, type_id=None,
 
         # 3. 在拉取的字典值中查找
         # 精确匹配
-        for name, did in cached_values.items():
-            if name.lower() == clean_name:
-                return did
+        for alias in aliases:
+            for name, did in cached_values.items():
+                if name.lower() == alias:
+                    return did
 
         # 通过通用层中文→俄语映射查找（统一颜色解析器第二阶段）
         ru_name = _translate_color_to_ru(color_name)
@@ -2812,6 +2832,13 @@ class PublishService:
         if not store_id:
             raise ValueError('请选择要发布到的 Ozon 店铺')
 
+        # 浏览器可能在响应返回前超时；重复提交时复用仍在处理的同店铺任务。
+        if product.get('publishStatus') == 'processing' and product.get('publishTaskId'):
+            existing_task = PublishTask.find_by_id(product['publishTaskId'])
+            if (existing_task and existing_task.get('storeId') == store_id
+                    and existing_task.get('status') in ('pending', 'processing')):
+                return existing_task
+
         # 创建本地任务记录（status=pending）
         # storeId 持久化到任务记录，便于重试/状态查询时复用同一店铺凭证
         task = PublishTask.create({
@@ -2900,7 +2927,10 @@ class PublishService:
         """
         ozon_task_id = task.get('ozonTaskId')
         if not ozon_task_id:
-            return {'status': task.get('status', 'pending'), 'message': '无Ozon任务ID'}
+            return {
+                'status': task.get('status', 'pending'),
+                'message': task.get('error') or '无Ozon任务ID',
+            }
 
         # 多店铺发布：从任务记录读取目标店铺凭证
         store_id = task.get('storeId')
