@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { width: 300px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; color: #333; background: #f9f9f9; }
+
+.header { background: linear-gradient(135deg, #ff6600, #ff8800); color: white; padding: 14px 16px; }
+.header h1 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+.header .subtitle { font-size: 11px; opacity: 0.9; }
+
+.status-bar { padding: 10px 16px; background: white; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 8px; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: #ccc; }
+.status-dot.online { background: #00b894; }
+.status-dot.offline { background: #d32f2f; }
+.status-text { font-size: 12px; color: #666; }
+.status-details { padding: 10px 16px; background: white; border-bottom: 1px solid #eee; }
+.status-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; margin-bottom: 6px; }
+.status-row:last-child { margin-bottom: 0; }
+.status-label { color: #999; }
+.status-value { color: #333; text-align: right; word-break: break-all; }
+.context-section { padding: 10px 16px; background: white; border-bottom: 1px solid #eee; }
+.context-title { font-size: 12px; color: #999; margin-bottom: 8px; font-weight: 600; }
+.context-select { width: 100%; padding: 7px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; margin-bottom: 8px; background: white; }
+.context-actions { display: flex; gap: 8px; }
+.context-actions .action-btn { margin-bottom: 0; padding: 8px; }
+
+.actions { padding: 12px 16px; }
+.action-btn { width: 100%; padding: 10px; margin-bottom: 8px; border: none; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; transition: opacity 0.2s; }
+.action-btn:hover { opacity: 0.9; }
+.action-btn.primary { background: #ff6600; color: white; }
+.action-btn.secondary { background: #f0f0f0; color: #333; }
+.action-btn:disabled { background: #ccc; cursor: not-allowed; }
+
+.history { padding: 0 16px 12px; }
+.history-title { font-size: 12px; color: #999; margin-bottom: 8px; font-weight: 600; }
+.history-item { padding: 8px 10px; background: white; border-radius: 6px; margin-bottom: 6px; font-size: 12px; border: 1px solid #eee; }
+.history-item .htitle { font-weight: 500; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.history-item .htime { color: #999; font-size: 11px; }
+
+.footer { padding: 10px 16px; border-top: 1px solid #eee; text-align: center; }
+.footer a { color: #ff6600; text-decoration: none; font-size: 11px; }
+.footer a:hover { text-decoration: underline; }
+
+.config-section { padding: 10px 16px; border-top: 1px solid #eee; }
+.config-section label { font-size: 11px; color: #999; display: block; margin-bottom: 4px; }
+.config-section input { width: 100%; padding: 6px 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>OZON OZON ERP</h1>
+  <div class="subtitle">1688 / 淘宝一键采集 → Ozon商品草稿</div>
+</div>
+
+<div class="status-bar">
+  <div class="status-dot" id="statusDot"></div>
+  <span class="status-text" id="statusText">检测中...</span>
+</div>
+
+<div class="status-details">
+  <div class="status-row"><span class="status-label">扩展版本</span><span class="status-value" id="extensionVersion">检测中...</span></div>
+  <div class="status-row"><span class="status-label">ERP 连接</span><span class="status-value" id="connectionStatus">检测中...</span></div>
+  <div class="status-row"><span class="status-label">更新状态</span><span class="status-value" id="updateStatus">检测中...</span></div>
+  <div class="status-row"><span class="status-label">当前 API</span><span class="status-value" id="apiAddressValue">检测中...</span></div>
+</div>
+
+<div class="context-section">
+  <div class="context-title">采集归属</div>
+  <div class="status-row"><span class="status-label">操作员</span><span class="status-value" id="operatorName">待归属</span></div>
+  <div class="status-row"><span class="status-label">目标店铺</span><span class="status-value" id="targetStore">待归属</span></div>
+  <div class="status-row"><span class="status-label">批次</span><span class="status-value" id="batchId">待归属</span></div>
+  <select class="context-select" id="storeSelect"></select>
+  <div class="context-actions">
+    <button class="action-btn primary" id="confirmStoreBtn">确认店铺</button>
+    <button class="action-btn secondary" id="switchStoreBtn">切换店铺</button>
+  </div>
+</div>
+
+<div class="actions">
+  <button class="action-btn primary" id="openPanelBtn">在当前页面打开采集面板</button>
+  <button class="action-btn secondary" id="openDesktopBtn">启动桌面软件</button>
+</div>
+
+<div class="history" id="historySection">
+  <div class="history-title">最近采集</div>
+  <div id="historyList">
+    <div style="color:#999;font-size:12px;text-align:center;padding:10px;">暂无采集记录</div>
+  </div>
+</div>
+
+<div class="config-section">
+  <label>桌面软件地址</label>
+  <input type="text" id="apiUrl" value="https://185.209.28.217" placeholder="https://185.209.28.217">
+</div>
+
+<div class="footer">
+  <a href="#" id="helpLink">使用帮助</a>
+</div>
+
+<script src="config.js"></script>
+<script src="popup.js"></script>
+</body>
+</html>

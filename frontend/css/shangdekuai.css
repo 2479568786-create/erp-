@@ -1,0 +1,21 @@
+.sdq-page { max-width: 1180px; margin: 0 auto; padding-bottom: 32px; }
+.sdq-step-card { margin: 16px 0; padding: 20px; border: 1px solid var(--border-color, #e5e7eb); border-radius: 12px; background: var(--bg-card, #fff); }
+.sdq-step-heading { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.sdq-step-heading > span { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: #eef2ff; color: #4338ca; font-weight: 700; }
+.sdq-step-heading strong, .sdq-step-heading small { display: block; }
+.sdq-step-heading small { margin-top: 3px; color: var(--text-secondary, #667085); font-size: 12px; }
+.sdq-source-row, .sdq-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.sdq-source-row .form-input { min-width: 280px; flex: 1; }
+.sdq-status, .sdq-muted { margin-top: 12px; color: var(--text-secondary, #667085); font-size: 13px; line-height: 1.6; }
+.sdq-source-data { display: grid; gap: 14px; margin-bottom: 18px; }
+.sdq-source-data label { color: var(--text-secondary, #667085); font-size: 12px; font-weight: 600; }
+.sdq-source-data p { margin: 5px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.sdq-long-text { max-height: 180px; overflow: auto; }
+.sdq-attributes { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 6px; margin-top: 6px; }
+.sdq-attribute { display: flex; justify-content: space-between; gap: 10px; padding: 8px 10px; border-radius: 7px; background: var(--bg-input, #f8fafc); font-size: 12px; }
+.sdq-attribute span { color: var(--text-secondary, #667085); }
+.sdq-attribute strong { text-align: right; overflow-wrap: anywhere; }
+.sdq-images { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.sdq-images img { width: 88px; height: 88px; object-fit: cover; border: 1px solid var(--border-color, #e5e7eb); border-radius: 8px; }
+.sdq-step-card .form-label { display: block; margin: 14px 0 6px; }
+@media (max-width: 700px) { .sdq-step-card { padding: 14px; } .sdq-source-row { align-items: stretch; } .sdq-source-row .form-input { flex-basis: 100%; } }

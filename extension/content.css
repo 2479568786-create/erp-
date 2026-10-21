@@ -1,0 +1,496 @@
+/* OZON精铺助手 - 采集面板样式 */
+/* 使用高优先级和!important避免被1688页面样式覆盖 */
+
+#ozon-collector-panel {
+  position: fixed !important;
+  top: 100px !important;
+  right: 20px !important;
+  width: 380px !important;
+  max-height: 80vh !important;
+  background: #ffffff !important;
+  border-radius: 10px !important;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.2) !important;
+  z-index: 2147483647 !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+  font-size: 13px !important;
+  color: #333 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+}
+
+#ozon-collector-panel.minimized {
+  width: 50px !important;
+  height: 50px !important;
+  max-height: 50px !important;
+  border-radius: 25px !important;
+  cursor: pointer !important;
+}
+
+#ozon-collector-panel.minimized .panel-body,
+#ozon-collector-panel.minimized .panel-footer {
+  display: none !important;
+}
+
+#ozon-collector-panel.minimized .panel-header {
+  height: 50px !important;
+  padding: 0 !important;
+  justify-content: center !important;
+}
+
+#ozon-collector-panel.minimized .panel-title,
+#ozon-collector-panel.minimized .panel-actions {
+  display: none !important;
+}
+
+#ozon-collector-panel.minimized .minimized-icon {
+  display: flex !important;
+}
+
+/* 头部 */
+#ozon-collector-panel .panel-header {
+  background: linear-gradient(135deg, #ff6600 0%, #ff8800 100%) !important;
+  color: white !important;
+  padding: 10px 14px !important;
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+  cursor: move !important;
+  user-select: none !important;
+  flex-shrink: 0 !important;
+}
+
+#ozon-collector-panel .panel-title {
+  font-weight: 600 !important;
+  font-size: 14px !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+}
+
+#ozon-collector-panel .minimized-icon {
+  display: none !important;
+  width: 30px !important;
+  height: 30px !important;
+  align-items: center !important;
+  justify-content: center !important;
+  font-size: 18px !important;
+}
+
+#ozon-collector-panel .panel-actions {
+  display: flex !important;
+  gap: 4px !important;
+}
+
+#ozon-collector-panel .panel-btn {
+  width: 24px !important;
+  height: 24px !important;
+  border: none !important;
+  background: rgba(255,255,255,0.2) !important;
+  color: white !important;
+  border-radius: 4px !important;
+  cursor: pointer !important;
+  font-size: 14px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 0 !important;
+  line-height: 1 !important;
+}
+
+#ozon-collector-panel .panel-btn:hover {
+  background: rgba(255,255,255,0.35) !important;
+}
+
+/* 主体 */
+#ozon-collector-panel .panel-body {
+  flex: 1 !important;
+  overflow-y: auto !important;
+  padding: 12px 14px !important;
+}
+
+#ozon-collector-panel .product-info {
+  background: #f9f9f9 !important;
+  border-radius: 6px !important;
+  padding: 10px !important;
+  margin-bottom: 12px !important;
+}
+
+#ozon-collector-panel .product-title {
+  font-weight: 600 !important;
+  font-size: 13px !important;
+  margin-bottom: 6px !important;
+  line-height: 1.4 !important;
+  color: #333 !important;
+}
+
+#ozon-collector-panel .product-stats {
+  display: flex !important;
+  gap: 12px !important;
+  font-size: 11px !important;
+  color: #999 !important;
+}
+
+#ozon-collector-panel .product-stats span {
+  color: #ff6600 !important;
+  font-weight: 600 !important;
+}
+
+/* 规格列表 */
+#ozon-collector-panel .sku-section-title {
+  font-weight: 600 !important;
+  font-size: 13px !important;
+  margin-bottom: 8px !important;
+  color: #333 !important;
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: center !important;
+}
+
+#ozon-collector-panel .sku-quick-actions {
+  display: flex !important;
+  gap: 6px !important;
+}
+
+#ozon-collector-panel .sku-quick-btn {
+  font-size: 11px !important;
+  padding: 2px 8px !important;
+  background: #f0f0f0 !important;
+  border: none !important;
+  border-radius: 4px !important;
+  cursor: pointer !important;
+  color: #666 !important;
+}
+
+#ozon-collector-panel .sku-quick-btn:hover {
+  background: #e0e0e0 !important;
+}
+
+#ozon-collector-panel .sku-item {
+  border: 1px solid #e8e8e8 !important;
+  border-radius: 6px !important;
+  margin-bottom: 8px !important;
+  overflow: hidden !important;
+}
+
+#ozon-collector-panel .sku-item.selected {
+  border-color: #ff6600 !important;
+  background: #fff9f5 !important;
+}
+
+#ozon-collector-panel .sku-header {
+  padding: 8px 10px !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  cursor: pointer !important;
+  background: #fafafa !important;
+}
+
+#ozon-collector-panel .sku-item.selected .sku-header {
+  background: #fff3e0 !important;
+}
+
+#ozon-collector-panel .sku-checkbox {
+  width: 16px !important;
+  height: 16px !important;
+  cursor: pointer !important;
+  flex-shrink: 0 !important;
+}
+
+#ozon-collector-panel .sku-image {
+  width: 32px !important;
+  height: 32px !important;
+  border-radius: 4px !important;
+  object-fit: cover !important;
+  flex-shrink: 0 !important;
+  border: 1px solid #eee !important;
+}
+
+#ozon-collector-panel .sku-name {
+  flex: 1 !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  color: #333 !important;
+}
+
+#ozon-collector-panel .sku-price-tag {
+  font-size: 11px !important;
+  color: #ff6600 !important;
+  font-weight: 600 !important;
+  background: #fff3e0 !important;
+  padding: 2px 6px !important;
+  border-radius: 3px !important;
+}
+
+#ozon-collector-panel .sku-price-tag.auto {
+  background: #e8f5e9 !important;
+  color: #00b894 !important;
+}
+
+#ozon-collector-panel .sku-toggle {
+  font-size: 10px !important;
+  color: #999 !important;
+  transition: transform 0.2s !important;
+}
+
+#ozon-collector-panel .sku-item.expanded .sku-toggle {
+  transform: rotate(90deg) !important;
+}
+
+/* 规格详情（展开后） */
+#ozon-collector-panel .sku-detail {
+  display: none !important;
+  padding: 10px !important;
+  border-top: 1px solid #eee !important;
+  background: white !important;
+}
+
+#ozon-collector-panel .sku-item.expanded .sku-detail {
+  display: block !important;
+}
+
+#ozon-collector-panel .form-row {
+  display: flex !important;
+  gap: 8px !important;
+  margin-bottom: 8px !important;
+  align-items: center !important;
+}
+
+#ozon-collector-panel .form-row:last-child {
+  margin-bottom: 0 !important;
+}
+
+#ozon-collector-panel .form-label {
+  font-size: 11px !important;
+  color: #666 !important;
+  width: 60px !important;
+  flex-shrink: 0 !important;
+}
+
+#ozon-collector-panel .form-input {
+  flex: 1 !important;
+  padding: 4px 8px !important;
+  border: 1px solid #ddd !important;
+  border-radius: 4px !important;
+  font-size: 12px !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  font-family: inherit !important;
+}
+
+#ozon-collector-panel .form-input:focus {
+  outline: none !important;
+  border-color: #ff6600 !important;
+  box-shadow: 0 0 0 2px rgba(255,102,0,0.1) !important;
+}
+
+#ozon-collector-panel .form-input.auto-filled {
+  background: #e8f5e9 !important;
+  border-color: #00b894 !important;
+}
+
+#ozon-collector-panel .form-unit {
+  font-size: 11px !important;
+  color: #999 !important;
+  width: 20px !important;
+  flex-shrink: 0 !important;
+}
+
+#ozon-collector-panel .size-inputs {
+  display: flex !important;
+  gap: 4px !important;
+  flex: 1 !important;
+  align-items: center !important;
+}
+
+#ozon-collector-panel .size-inputs .form-input {
+  flex: 1 !important;
+  text-align: center !important;
+}
+
+#ozon-collector-panel .size-sep {
+  color: #ccc !important;
+  font-size: 12px !important;
+}
+
+#ozon-collector-panel .form-group-title {
+  font-size: 11px !important;
+  color: #999 !important;
+  font-weight: 600 !important;
+  margin: 8px 0 6px !important;
+  padding-bottom: 4px !important;
+  border-bottom: 1px dashed #eee !important;
+}
+
+#ozon-collector-panel .copy-btn {
+  font-size: 10px !important;
+  padding: 2px 6px !important;
+  background: #f0f0f0 !important;
+  border: none !important;
+  border-radius: 3px !important;
+  cursor: pointer !important;
+  color: #666 !important;
+  margin-left: auto !important;
+}
+
+#ozon-collector-panel .copy-btn:hover {
+  background: #e0e0e0 !important;
+}
+
+/* 底部 */
+#ozon-collector-panel .panel-footer {
+  padding: 12px 14px !important;
+  border-top: 1px solid #eee !important;
+  flex-shrink: 0 !important;
+  background: #fafafa !important;
+}
+
+/* ===== 图片采集区 ===== */
+#ozon-image-list {
+  display: grid !important;
+  grid-template-columns: repeat(3, 1fr) !important;
+  gap: 6px !important;
+  padding: 2px 0 6px !important;
+}
+
+#ozon-collector-panel .image-item {
+  position: relative !important;
+  aspect-ratio: 1 / 1 !important;
+  border: 2px solid transparent !important;
+  border-radius: 6px !important;
+  overflow: hidden !important;
+  cursor: pointer !important;
+  background: #f5f5f5 !important;
+}
+
+#ozon-collector-panel .image-item img {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: contain !important;
+  display: block !important;
+}
+
+#ozon-collector-panel .image-item.selected {
+  border-color: #ff6600 !important;
+}
+
+#ozon-collector-panel .image-badge {
+  position: absolute !important;
+  left: 3px !important;
+  bottom: 3px !important;
+  font-size: 10px !important;
+  line-height: 1 !important;
+  padding: 2px 5px !important;
+  border-radius: 3px !important;
+  background: rgba(0, 0, 0, 0.55) !important;
+  color: #fff !important;
+}
+
+#ozon-collector-panel .image-check {
+  position: absolute !important;
+  right: 3px !important;
+  top: 3px !important;
+  width: 18px !important;
+  height: 18px !important;
+  border-radius: 50% !important;
+  background: #ff6600 !important;
+  color: #fff !important;
+  font-size: 12px !important;
+  line-height: 18px !important;
+  text-align: center !important;
+}
+
+#ozon-collector-panel .image-collect-btn {
+  width: 100% !important;
+  padding: 9px !important;
+  margin-bottom: 8px !important;
+  background: linear-gradient(135deg, #465fff 0%, #6b7fff 100%) !important;
+  color: white !important;
+  border: none !important;
+  border-radius: 6px !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  transition: opacity 0.2s !important;
+}
+
+#ozon-collector-panel .image-collect-btn:hover {
+  opacity: 0.9 !important;
+}
+
+#ozon-collector-panel .image-collect-btn:disabled {
+  background: #ccc !important;
+  cursor: not-allowed !important;
+}
+
+#ozon-collector-panel .collect-btn {
+  width: 100% !important;
+  padding: 10px !important;
+  background: linear-gradient(135deg, #ff6600 0%, #ff8800 100%) !important;
+  color: white !important;
+  border: none !important;
+  border-radius: 6px !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  transition: opacity 0.2s !important;
+}
+
+#ozon-collector-panel .collect-btn:hover {
+  opacity: 0.9 !important;
+}
+
+#ozon-collector-panel .collect-btn:disabled {
+  background: #ccc !important;
+  cursor: not-allowed !important;
+}
+
+#ozon-collector-panel .footer-hint {
+  font-size: 11px !important;
+  color: #999 !important;
+  text-align: center !important;
+  margin-top: 8px !important;
+}
+
+/* 状态提示 */
+#ozon-collector-panel .status-message {
+  padding: 8px 10px !important;
+  border-radius: 4px !important;
+  font-size: 12px !important;
+  margin-bottom: 10px !important;
+  display: none !important;
+}
+
+#ozon-collector-panel .status-message.show {
+  display: block !important;
+}
+
+#ozon-collector-panel .status-message.success {
+  background: #e8f5e9 !important;
+  color: #00b894 !important;
+}
+
+#ozon-collector-panel .status-message.error {
+  background: #ffebee !important;
+  color: #d32f2f !important;
+}
+
+#ozon-collector-panel .status-message.info {
+  background: #e3f2fd !important;
+  color: #1976d2 !important;
+}
+
+/* 滚动条 */
+#ozon-collector-panel .panel-body::-webkit-scrollbar {
+  width: 6px !important;
+}
+
+#ozon-collector-panel .panel-body::-webkit-scrollbar-track {
+  background: #f1f1f1 !important;
+}
+
+#ozon-collector-panel .panel-body::-webkit-scrollbar-thumb {
+  background: #ccc !important;
+  border-radius: 3px !important;
+}

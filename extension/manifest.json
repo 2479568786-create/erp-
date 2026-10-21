@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "OZON ERP 商品采集插件",
+  "version": "1.5.2",
+    "description": "在 Ozon、1688 和淘宝商品页面采集商品信息并发送到 ERP 采集箱",
+  "permissions": ["storage", "activeTab", "scripting", "alarms", "notifications"],
+  "host_permissions": [
+    "https://*.1688.com/*",
+    "https://*.taobao.com/*",
+    "https://*.tmall.com/*",
+    "https://ozon.ru/*",
+    "https://*.ozon.ru/*",
+    "https://185.209.28.217/*",
+    "http://localhost:5000/*",
+    "http://127.0.0.1:5000/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://*.1688.com/*", "https://detail.1688.com/*", "https://*.taobao.com/*", "https://*.tmall.com/*", "https://ozon.ru/product/*", "https://*.ozon.ru/product/*"],
+      "js": ["config.js", "extractors.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "OZON ERP 采集",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
