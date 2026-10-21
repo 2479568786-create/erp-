@@ -15,6 +15,7 @@ from flask import request
 
 from db import query, execute
 from utils.response import error_response
+from utils.image_proxy import is_public_ozon_image_url
 
 
 _PUBLIC_API_PATHS = {
@@ -31,6 +32,8 @@ def require_api_auth():
     if not request.path.startswith('/api/') or request.method == 'OPTIONS':
         return None
     if request.path in _PUBLIC_API_PATHS:
+        return None
+    if request.method == 'GET' and request.path == '/api/image_proxy' and is_public_ozon_image_url(request.args.get('url')):
         return None
     if request.method == 'GET' and request.path.startswith('/api/gallery/files/'):
         return None

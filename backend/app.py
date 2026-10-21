@@ -16,6 +16,7 @@ from db import init_db
 from routes import register_blueprints
 from utils.response import error_response
 from utils.auth import require_api_auth
+from utils.image_proxy import is_public_ozon_image_url
 
 # 前端目录（相对于 backend/ 的上级目录）
 FRONTEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'frontend'))
@@ -182,6 +183,9 @@ def create_app(config_class=Config):
     @app.route('/api/image_proxy', methods=['GET'])
     def image_proxy():
         """图片代理：通过后端转发请求，绕过浏览器Referer限制"""
+        from utils.auth import get_current_user
+        from utils.image_proxy import OzonImageRedirectHandler
+
         target_url = flask_request_obj.args.get('url', '')
         if not target_url:
             return error_response("缺少 url 参数", 400)
@@ -189,15 +193,19 @@ def create_app(config_class=Config):
         # 仅允许 http/https 协议
         if not target_url.startswith(('http://', 'https://')):
             return error_response("仅支持 http/https URL", 400)
+        if not is_public_ozon_image_url(target_url) and not get_current_user():
+            return error_response("请先登录", 401)
 
         try:
             req = urllib.request.Request(target_url)
             # 模拟浏览器请求头，绕过防盗链
             req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-            req.add_header('Referer', 'https://detail.1688.com/')
+            req.add_header('Referer', 'https://www.ozon.ru/' if is_public_ozon_image_url(target_url) else 'https://detail.1688.com/')
             req.add_header('Accept', 'image/webp,image/apng,image/*,*/*;q=0.8')
 
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            open_image = (urllib.request.build_opener(OzonImageRedirectHandler).open
+                          if is_public_ozon_image_url(target_url) else urllib.request.urlopen)
+            with open_image(req, timeout=10) as resp:
                 content_type = resp.headers.get('Content-Type', 'image/jpeg')
                 data = resp.read()
 
@@ -399,7 +407,7 @@ def create_app(config_class=Config):
                 try:
                     req = urllib.request.Request(img_url)
                     req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-                    req.add_header('Referer', 'https://detail.1688.com/')
+                    req.add_header('Referer', 'https://www.ozon.ru/' if is_public_ozon_image_url(img_url) else 'https://detail.1688.com/')
                     req.add_header('Accept', 'image/webp,image/apng,image/*,*/*;q=0.8')
 
                     with urllib.request.urlopen(req, timeout=15) as resp:

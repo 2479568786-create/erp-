@@ -108,6 +108,12 @@ class Config:
     # 七牛云绑定域名（CDN 加速域名），如 https://cdn.example.com
     QINIU_DOMAIN = os.environ.get('QINIU_DOMAIN', '')
 
+    # 阿里云 OSS 对象存储（可选）
+    OSS_ACCESS_KEY_ID = os.environ.get('OSS_ACCESS_KEY_ID', '')
+    OSS_ACCESS_KEY_SECRET = os.environ.get('OSS_ACCESS_KEY_SECRET', '')
+    OSS_BUCKET = os.environ.get('OSS_BUCKET', '')
+    OSS_ENDPOINT = os.environ.get('OSS_ENDPOINT', '')
+
     # ===== 价格换算配置 =====
     # 采集 1688 商品时，货源价为人民币(CNY)
     # 根据店铺合同币种自动选择汇率：

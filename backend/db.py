@@ -166,6 +166,25 @@ def _run_migrations(conn):
             conn.execute(ddl)
     conn.commit()
 
+    # 服务器版本增加选品来源字段；旧库补列后再建索引。
+    research_cols = {
+        row['name'] for row in conn.execute("PRAGMA table_info(product_research_items)")
+    }
+    for name, definition in {
+        'source_type': "TEXT NOT NULL DEFAULT 'manual'",
+        'source_id': "TEXT NOT NULL DEFAULT ''",
+        'platform': "TEXT NOT NULL DEFAULT 'ozon'",
+        'source_payload_json': "TEXT NOT NULL DEFAULT '{}'",
+        'source_synced_at': 'TEXT',
+    }.items():
+        if name not in research_cols:
+            conn.execute(f"ALTER TABLE product_research_items ADD COLUMN {name} {definition}")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_research_source "
+        "ON product_research_items(source_type, source_id, platform) WHERE source_id <> ''"
+    )
+    conn.commit()
+
     # 迁移6：product_cards 表由 schema.sql 负责创建（CREATE TABLE IF NOT EXISTS）。
     # 此处仅作幂等兜底：若表不存在则显式创建，避免旧库未执行完整 schema 时挂起。
     table_exists = conn.execute(
@@ -305,6 +324,18 @@ def _run_migrations(conn):
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_public_notifications_published ON public_notifications(published_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_public_notification_reads_user ON public_notification_reads(user_id, read_at DESC)")
+    conn.commit()
+
+    # 旧图库表补账号归属；原有生图元数据列由上方迁移保留。
+    gallery_cols = {
+        row['name'] for row in conn.execute("PRAGMA table_info(gallery_assets)")
+    }
+    if 'user_id' not in gallery_cols:
+        conn.execute("ALTER TABLE gallery_assets ADD COLUMN user_id INTEGER")
+        admin = conn.execute("SELECT id FROM accounts WHERE role = 'admin' ORDER BY id LIMIT 1").fetchone()
+        if admin:
+            conn.execute("UPDATE gallery_assets SET user_id = ? WHERE user_id IS NULL", (admin['id'],))
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_gallery_assets_user_created ON gallery_assets(user_id, created_at)")
     conn.commit()
 
     # 迁移10：PixPix OAuth/MCP 服务端连接状态（单例 id=1）

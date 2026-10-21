@@ -297,6 +297,15 @@ CREATE TABLE IF NOT EXISTS watermark_templates (
 
 CREATE INDEX IF NOT EXISTS idx_watermark_templates_default ON watermark_templates(is_default);
 
+-- ===== 店铺级图片水印 =====
+CREATE TABLE IF NOT EXISTS shop_watermarks (
+    store_id        INTEGER PRIMARY KEY REFERENCES stores(id) ON DELETE CASCADE,
+    filename        TEXT NOT NULL DEFAULT '',
+    original_name   TEXT NOT NULL DEFAULT '',
+    config          TEXT NOT NULL DEFAULT '{"position":"bottom-right","widthRatio":0.18,"opacity":0.7,"marginRatio":0.03}',
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- ===== 选品规则表 =====
 -- 替代毛子 ERP 云端 /api.selection.plugin/*，本地管理选品规则
 CREATE TABLE IF NOT EXISTS selection_rules (
@@ -382,6 +391,7 @@ CREATE INDEX IF NOT EXISTS idx_online_products_updated ON online_products(update
 -- ===== 我的图库 =====
 CREATE TABLE IF NOT EXISTS gallery_assets (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER,
     filename        TEXT NOT NULL UNIQUE,
     original_name   TEXT NOT NULL DEFAULT '',
     title           TEXT NOT NULL DEFAULT '',
@@ -402,6 +412,22 @@ CREATE TABLE IF NOT EXISTS gallery_assets (
 CREATE INDEX IF NOT EXISTS idx_gallery_assets_created ON gallery_assets(created_at);
 CREATE INDEX IF NOT EXISTS idx_gallery_assets_source ON gallery_assets(source);
 CREATE INDEX IF NOT EXISTS idx_gallery_assets_favorite ON gallery_assets(favorite);
+
+CREATE TABLE IF NOT EXISTS gallery_folders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS gallery_folder_assets (
+    folder_id INTEGER NOT NULL REFERENCES gallery_folders(id) ON DELETE CASCADE,
+    asset_id INTEGER NOT NULL REFERENCES gallery_assets(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(folder_id, asset_id)
+);
+CREATE INDEX IF NOT EXISTS idx_gallery_folders_user_created ON gallery_folders(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gallery_folder_assets_asset ON gallery_folder_assets(asset_id);
 
 -- ===== 订单表（FBS / FBO 发货单） =====
 CREATE TABLE IF NOT EXISTS orders (
@@ -456,6 +482,11 @@ CREATE TABLE IF NOT EXISTS product_research_items (
     notes               TEXT    NOT NULL DEFAULT '',
     status              TEXT    NOT NULL DEFAULT '待调研',  -- 待调研/调研中/已立项/已放弃
     created_by          TEXT    NOT NULL DEFAULT '',
+    source_type         TEXT    NOT NULL DEFAULT 'manual',
+    source_id           TEXT    NOT NULL DEFAULT '',
+    platform            TEXT    NOT NULL DEFAULT 'ozon',
+    source_payload_json TEXT    NOT NULL DEFAULT '{}',
+    source_synced_at    TEXT,
     created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
     updated_at          TEXT    NOT NULL DEFAULT (datetime('now'))
 );
@@ -622,3 +653,42 @@ CREATE TABLE IF NOT EXISTS pixpix_oauth_accounts (
     expires_at TEXT,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- ===== 上得快来源草稿和采集任务 =====
+CREATE TABLE IF NOT EXISTS shangdekuai_drafts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    source_url TEXT NOT NULL,
+    source_product_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    collected_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(account_id, source_url)
+);
+CREATE INDEX IF NOT EXISTS idx_shangdekuai_drafts_account_updated
+    ON shangdekuai_drafts(account_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS shangdekuai_collection_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    source_url TEXT NOT NULL,
+    source_product_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued'
+        CHECK(status IN ('queued','fetching','parsing','normalizing','completed','failed')),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    error_code TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT '',
+    draft_id INTEGER REFERENCES shangdekuai_drafts(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at TEXT,
+    finished_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_shangdekuai_jobs_account_url_status
+    ON shangdekuai_collection_jobs(account_id, source_url, status);
+CREATE INDEX IF NOT EXISTS idx_shangdekuai_jobs_account_updated
+    ON shangdekuai_collection_jobs(account_id, updated_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_shangdekuai_jobs_one_active
+    ON shangdekuai_collection_jobs(account_id, source_url)
+    WHERE status IN ('queued','fetching','parsing','normalizing');

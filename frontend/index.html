@@ -7,9 +7,9 @@
   <title>GeekOzon ERP</title>
 
   <!-- Tailwind Play CDN（让 TailAdmin 真实类生效） -->
-  <script src="https://cdn.tailwindcss.com"></script>
   <script>
-    tailwind.config = {
+    window.tailwind = window.tailwind || {};
+    window.tailwind.config = {
       corePlugins: { preflight: false },
       theme: {
         extend: {
@@ -65,6 +65,7 @@
       },
     };
   </script>
+  <script async src="https://cdn.tailwindcss.com"></script>
 
   <!-- Outfit 字体（TailAdmin 默认字体） -->
   <link rel="preconnect" href="https://fonts.googleapis.com">

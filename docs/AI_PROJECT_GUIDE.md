@@ -6,9 +6,10 @@
 
 1. [`README.md`](../README.md)：项目用途、范围和启动入口。
 2. [`docs/WORKSPACE_MAP.md`](WORKSPACE_MAP.md)：按运营工作区快速定位文件。
-3. [`backend/app.py`](../backend/app.py) 与 [`backend/routes/__init__.py`](../backend/routes/__init__.py)：应用创建、前端托管、鉴权和路由注册。
-4. [`frontend/index.html`](../frontend/index.html)、[`frontend/js/app.js`](../frontend/js/app.js)、[`frontend/js/router.js`](../frontend/js/router.js)：页面如何加载和切换。
-5. 对应页面、API、路由、服务、模型与测试：沿一条具体功能链路核对，不要仅凭文件名下结论。
+3. [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)：理解运行入口、代码分工和公开边界。
+4. [`backend/app.py`](../backend/app.py) 与 [`backend/routes/__init__.py`](../backend/routes/__init__.py)：应用创建、前端托管、鉴权和路由注册。
+5. [`frontend/index.html`](../frontend/index.html)、[`frontend/js/app.js`](../frontend/js/app.js)、[`frontend/js/router.js`](../frontend/js/router.js)：页面如何加载和切换。
+6. 对应页面、API、路由、服务、模型与测试：沿一条具体功能链路核对，不要仅凭文件名下结论。
 
 ## 项目结构：用简单的话理解
 
@@ -51,7 +52,7 @@
 
 ## 已知边界和容易误读的地方
 
-- 这份仓库来自 2026-09-06 本地快照，不保证与服务器当前部署版本一致。
+- 仓库以早期本地快照为基础，部分工作区和基础层已对照服务器更新；仍不是完整部署版本。
 - 独立 JLC 研究工作台及其完整后端不在本仓库；`jlc_pricing_service.py` 只代表 JLC 相关定价代码。
 - 目录中有 AI、上架、图片、财务等模块，但配置、凭证、平台规则和外部服务状态决定实际能否运行。
 - 运行测试不等于已对 Ozon 线上商品做过端到端验证；没有凭证的情况下应明确写“未验证”。
