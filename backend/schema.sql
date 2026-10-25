@@ -41,6 +41,11 @@ CREATE TABLE IF NOT EXISTS stores (
     auth_time       TEXT,                                -- 授权时间
     today_limit     INTEGER NOT NULL DEFAULT 0,         -- 今日可刊登数
     account_id      INTEGER,                           -- 所属账户 ID（可为空，表示公共店铺）
+    perf_client_id  TEXT,                              -- Ozon Performance API client_id（广告数据，与商品 API 凭证不通用）
+    perf_client_secret TEXT,                           -- Ozon Performance API client_secret（加密存储）
+    perf_token      TEXT,                              -- Performance API Bearer Token 缓存（有效期 1800 秒）
+    perf_token_expires_at TEXT,                        -- Token 过期时间（提前 5 分钟续签）
+    ad_monitor_enabled INTEGER NOT NULL DEFAULT 1,     -- 是否纳入 AI 广告监控 (0=关, 1=开)
     created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT    NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
@@ -692,3 +697,99 @@ CREATE INDEX IF NOT EXISTS idx_shangdekuai_jobs_account_updated
 CREATE UNIQUE INDEX IF NOT EXISTS idx_shangdekuai_jobs_one_active
     ON shangdekuai_collection_jobs(account_id, source_url)
     WHERE status IN ('queued','fetching','parsing','normalizing');
+
+-- ===== AI 广告监控（Ozon Performance API） =====
+-- 说明：本工作区只「盯效果」，不代投、不干预投放。数据源是 api-performance.ozon.ru，
+-- 与商品 Seller API 是两套凭证，不能混用（见 docs/AI广告监控.md）。
+
+-- 广告活动（付费方式/展示位置/状态/预算）
+CREATE TABLE IF NOT EXISTS ad_campaigns (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_pk        INTEGER NOT NULL,                  -- stores.id
+    store_id        TEXT    NOT NULL DEFAULT '',       -- Ozon 店铺 ID
+    campaign_id     TEXT    NOT NULL DEFAULT '',
+    title           TEXT    NOT NULL DEFAULT '',
+    payment_type    TEXT    NOT NULL DEFAULT '',       -- CPC / CPO ...
+    placement       TEXT    NOT NULL DEFAULT '',       -- 数组已用 '/' 拼成字符串
+    state           TEXT    NOT NULL DEFAULT '',
+    adv_object_type TEXT    NOT NULL DEFAULT '',
+    budget          TEXT    NOT NULL DEFAULT '',
+    daily_budget    TEXT    NOT NULL DEFAULT '',
+    from_date       TEXT    NOT NULL DEFAULT '',
+    to_date         TEXT    NOT NULL DEFAULT '',
+    synced_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(store_pk, campaign_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ad_campaigns_store ON ad_campaigns(store_pk);
+
+-- 商品级按天指标（R1 已完成测评 / R2 点击率偏低 / R3 高花费无转化 的数据源）
+CREATE TABLE IF NOT EXISTS ad_sku_stats (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_pk        INTEGER NOT NULL,
+    store_id        TEXT    NOT NULL DEFAULT '',
+    stat_date       TEXT    NOT NULL,                  -- MSK 自然日 YYYY-MM-DD
+    sku             TEXT    NOT NULL,
+    campaign_id     TEXT    NOT NULL DEFAULT '',
+    title           TEXT    NOT NULL DEFAULT '',
+    impressions     INTEGER NOT NULL DEFAULT 0,        -- 曝光
+    clicks          INTEGER NOT NULL DEFAULT 0,        -- 点击
+    ctr             REAL    NOT NULL DEFAULT 0,        -- 点击率（0~1）
+    expense         REAL    NOT NULL DEFAULT 0,        -- 花费 ₽
+    avg_cpc         REAL    NOT NULL DEFAULT 0,
+    orders          INTEGER NOT NULL DEFAULT 0,
+    sales           REAL    NOT NULL DEFAULT 0,
+    to_cart         INTEGER NOT NULL DEFAULT 0,
+    drr             REAL    NOT NULL DEFAULT 0,        -- 广告费占比（0~1）
+    synced_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(store_pk, sku, campaign_id, stat_date)
+);
+CREATE INDEX IF NOT EXISTS idx_ad_sku_store ON ad_sku_stats(store_pk, stat_date);
+CREATE INDEX IF NOT EXISTS idx_ad_sku_sku ON ad_sku_stats(sku);
+
+-- 每日花费（R4 当日花费告警的数据源，由 ad_sku_stats 反推汇总）
+CREATE TABLE IF NOT EXISTS ad_daily_stats (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_pk        INTEGER NOT NULL,
+    store_id        TEXT    NOT NULL DEFAULT '',
+    stat_date       TEXT    NOT NULL,
+    campaign_id     TEXT    NOT NULL DEFAULT '',
+    campaign_title  TEXT    NOT NULL DEFAULT '',
+    impressions     INTEGER NOT NULL DEFAULT 0,
+    clicks          INTEGER NOT NULL DEFAULT 0,
+    expense         REAL    NOT NULL DEFAULT 0,
+    avg_cpc         REAL    NOT NULL DEFAULT 0,
+    orders          INTEGER NOT NULL DEFAULT 0,
+    orders_amount   REAL    NOT NULL DEFAULT 0,
+    synced_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(store_pk, stat_date, campaign_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ad_daily_store ON ad_daily_stats(store_pk, stat_date);
+
+-- 同步日志（排障用）
+CREATE TABLE IF NOT EXISTS ad_sync_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_pk        INTEGER NOT NULL,
+    store_id        TEXT    NOT NULL DEFAULT '',
+    status          TEXT    NOT NULL DEFAULT '',       -- ok / error
+    campaigns       INTEGER NOT NULL DEFAULT 0,
+    sku_rows        INTEGER NOT NULL DEFAULT 0,
+    daily_rows      INTEGER NOT NULL DEFAULT 0,
+    message         TEXT    NOT NULL DEFAULT '',
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ad_sync_log_store ON ad_sync_log(store_pk, created_at DESC);
+
+-- 阈值配置（单行表，只有管理员能改）
+CREATE TABLE IF NOT EXISTS ad_monitor_settings (
+    id                      INTEGER PRIMARY KEY CHECK(id = 1),
+    test_clicks_threshold   INTEGER NOT NULL DEFAULT 30,    -- R1 已完成测评：累计点击 >= 30
+    low_ctr_threshold       REAL    NOT NULL DEFAULT 0.04,  -- R2 点击率偏低：CTR < 4%
+    low_ctr_min_views       INTEGER NOT NULL DEFAULT 100,   -- R2 最低曝光门槛（防噪音）
+    high_spend_threshold    REAL    NOT NULL DEFAULT 1000,  -- R3 高花费无转化：花费 > 1000₽ 且零订单
+    daily_spend_threshold   REAL    NOT NULL DEFAULT 500,   -- R4 当日花费告警：单店当日 >= 500₽
+    updated_at              TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_by_id           INTEGER,
+    updated_by_name         TEXT    NOT NULL DEFAULT ''
+);
+INSERT OR IGNORE INTO ad_monitor_settings (id) VALUES (1);
+

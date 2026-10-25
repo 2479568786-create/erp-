@@ -123,6 +123,27 @@ def _run_migrations(conn):
         conn.execute(
             "ALTER TABLE stores ADD COLUMN seller_cookies TEXT"
         )
+
+    # 迁移3：stores 表添加 Ozon Performance API 凭证列（AI 广告监控用）
+    # 背景：广告数据在 api-performance.ozon.ru，与商品 Seller API 是两套独立凭证；
+    #       只填商品 API Key 拉不到广告数据。老库没有这些列时，广告监控一查就报
+    #       "no such column: perf_client_id"，因此必须在此补齐（广告监控功能上线时遗漏）。
+    _perf_store_cols = (
+        ("perf_client_id", "TEXT"),
+        ("perf_client_secret", "TEXT"),
+        ("perf_token", "TEXT"),
+        ("perf_token_expires_at", "TEXT"),
+        ("ad_monitor_enabled", "INTEGER NOT NULL DEFAULT 1"),
+    )
+    for col_name, col_ddl in _perf_store_cols:
+        if col_name not in stores_cols:
+            conn.execute("ALTER TABLE stores ADD COLUMN %s %s" % (col_name, col_ddl))
+
+    # 迁移3.1：AI 广告监控阈值表必须有 id=1 的默认行
+    # 原因：update_settings() 用的是 UPDATE ... WHERE id = 1，
+    #       行不存在时更新会静默不生效（管理员改了阈值以为保存了，其实没落库）。
+    conn.execute("INSERT OR IGNORE INTO ad_monitor_settings (id) VALUES (1)")
+
     online_cols = {
         row['name'] for row in conn.execute("PRAGMA table_info(online_products)")
     }

@@ -12,6 +12,7 @@
 import os
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -38,7 +39,15 @@ for pk, sid, alias in ((101, 'S001', '甲店'), (102, 'S002', '乙店')):
                " perf_client_id, perf_client_secret, ad_monitor_enabled)"
                " VALUES (?, ?, ?, 'RUB', '测试', 'active', '', '', 1)", (pk, sid, alias))
 
-DF, DT = '2026-08-15', '2026-09-13'
+# 日期不能写死：service 的商品窗口是「近 30 天」（相对今天），
+# 写死的历史日期会让数据落到窗口外，告警恒为空——这本测试曾因此变成"时间炸弹"
+# （2026-09 前后写死 2026-09-13，到 10 月就必然全挂）。统一按莫斯科时间取今天/昨天。
+_MSK = timezone(timedelta(hours=3))
+_NOW = datetime.now(_MSK)
+TODAY = _NOW.strftime('%Y-%m-%d')
+YDAY = (_NOW - timedelta(days=1)).strftime('%Y-%m-%d')
+DF = (_NOW - timedelta(days=29)).strftime('%Y-%m-%d')
+DT = TODAY
 
 
 def add_sku(store_pk, sku, views, clicks, expense, orders, title='', stat_date=None):
@@ -85,9 +94,9 @@ db.execute("UPDATE ad_sku_stats SET campaign_id='c2', id=id+1000 WHERE sku='SKU_
 add_sku(102, 'SKU_MULTI_A', views=600, clicks=17, expense=100, orders=0, title='多活动商品')
 
 # R4 日花费
-add_daily(101, '2026-09-13', 620.0)            # 超线
-add_daily(102, '2026-09-13', 480.5)            # 未超线
-add_daily(101, '2026-09-12', 900.0)            # 昨天超线，但今天不该报
+add_daily(101, TODAY, 620.0)            # 超线
+add_daily(102, TODAY, 480.5)            # 未超线
+add_daily(101, YDAY, 900.0)             # 昨天超线，但今天不该报
 
 print()
 print('=== R1 已完成测评 ===')
@@ -116,7 +125,7 @@ check('刚好 1000₽ 零订单 → 不告警（规则为「超过」）', 'SKU_
 
 print()
 print('=== R4 当日花费告警 ===')
-spend = svc.daily_spend([101, 102], '2026-09-13')
+spend = svc.daily_spend([101, 102], TODAY)
 by = {s['storePk']: s for s in spend}
 print('   ', [(s['storeName'], s['expense'], s['exceeded']) for s in spend])
 check('甲店 620₽ ≥ 500 超线', by[101]['exceeded'] is True)
@@ -126,7 +135,7 @@ check('只统计指定日期（不含昨天 900₽）', by[101]['expense'] == 62
 
 print()
 print('=== 弹窗告警集合 ===')
-alerts = svc.build_alerts([101, 102], '2026-09-13')
+alerts = svc.build_alerts([101, 102], TODAY)
 check('hasDailyWarning 为真', alerts['hasDailyWarning'] is True)
 check('只对超线店铺产生弹窗告警', len(alerts['dailySpendAlerts']) == 1,
       str([a['storeName'] for a in alerts['dailySpendAlerts']]))
@@ -149,7 +158,7 @@ check('同一商品可同时命中「已完成测评」与「点击率偏低」'
 print()
 print('=== 阈值可调：把日花费阈值调到 1000 ===')
 svc.update_settings({'dailySpendThreshold': 1000})
-alerts2 = svc.build_alerts([101, 102], '2026-09-13')
+alerts2 = svc.build_alerts([101, 102], TODAY)
 check('阈值提高后不再告警', alerts2['hasDailyWarning'] is False,
       str(alerts2['dailySpendAlerts']))
 svc.update_settings({'dailySpendThreshold': 500})
