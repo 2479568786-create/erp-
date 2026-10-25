@@ -25,7 +25,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let desktopRunning = false;
   let hasConfirmedContext = false;
   let contextState = 'unknown';
-  apiUrlInput.value = OZON_CONFIG.LOCAL_API_URL;
+  if (OZON_CONFIG.LOCAL_API_URL) apiUrlInput.value = OZON_CONFIG.LOCAL_API_URL;
   extensionVersion.textContent = installedVersion;
   apiAddressValue.textContent = apiUrlInput.value;
 
@@ -42,6 +42,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const nextApiUrl = apiUrlInput.value.trim();
     chrome.storage.local.set({ desktop_api_url: nextApiUrl });
     apiAddressValue.textContent = nextApiUrl;
+    // MV3：用户自己填的 ERP 地址需要按需申请主机权限（manifest 里声明为 optional_host_permissions）
+    try {
+      const origin = nextApiUrl ? new URL(nextApiUrl).origin + '/*' : '';
+      if (origin && chrome.permissions && chrome.permissions.request) {
+        chrome.permissions.request({ origins: [origin] }).catch(() => {});
+      }
+    } catch (e) { /* 地址格式不对时先保存，具体错误由状态检查返回 */ }
     checkDesktopStatus();
     refreshCollectionContext();
   });

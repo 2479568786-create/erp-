@@ -527,7 +527,7 @@
       createElement('div', { class: 'panel-footer' }, [
         createElement('button', { class: 'image-collect-btn', id: 'ozon-image-btn', onclick: collectImages }, ['🖼 采集图片到 ERP 图库']),
         createElement('button', { class: 'collect-btn', id: 'ozon-collect-btn', onclick: sendToDesktop }, ['一键采集到OZON ERP']),
-        createElement('div', { class: 'footer-hint' }, ['采集将发送到云端 ERP（https://185.209.28.217）']),
+        createElement('div', { class: 'footer-hint' }, ['采集将发送到你在插件里配置的 ERP 地址']),
       ]),
     ]);
 

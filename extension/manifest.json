@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OZON ERP 商品采集插件",
-  "version": "1.5.2",
+  "version": "1.5.3",
     "description": "在 Ozon、1688 和淘宝商品页面采集商品信息并发送到 ERP 采集箱",
   "permissions": ["storage", "activeTab", "scripting", "alarms", "notifications"],
   "host_permissions": [
@@ -10,9 +10,12 @@
     "https://*.tmall.com/*",
     "https://ozon.ru/*",
     "https://*.ozon.ru/*",
-    "https://185.209.28.217/*",
     "http://localhost:5000/*",
     "http://127.0.0.1:5000/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
   ],
   "content_scripts": [
     {

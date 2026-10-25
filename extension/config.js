@@ -1,6 +1,7 @@
 (function(root) {
   const config = {
-    LOCAL_API_URL: 'https://185.209.28.217',
+    // 不写死任何线上地址：由 popup 保存到 chrome.storage.local['desktop_api_url']
+    LOCAL_API_URL: '',
     IMAGE_FILTER_DEFAULTS: {
       minWidth: 600,
       minHeight: 600,

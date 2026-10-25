@@ -186,6 +186,9 @@ async function findWorkbenchToken(apiUrl) {
 
 async function fetchWorkbench(path, options = {}) {
   const apiUrl = options.apiUrl || await getApiBaseUrl();
+  if (!apiUrl) {
+    throw new Error('未配置 ERP 地址：请在插件弹窗里填写 ERP 地址后重试');
+  }
   const headers = new Headers(options.headers || {});
   if (!headers.has('Content-Type') && options.body) {
     headers.set('Content-Type', 'application/json');
