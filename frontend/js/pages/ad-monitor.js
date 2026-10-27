@@ -121,11 +121,9 @@ const AdMonitorPage = (() => {
             </p>
           </div>
           <div class="store-header-actions">
-            <select id="amStoreFilter" class="btn btn-sm btn-ghost" style="padding:6px 8px;"
+            <select id="amStoreFilter" class="btn btn-sm btn-ghost" style="padding:6px 8px;max-width:180px;"
                     onchange="AdMonitorPage.setStore(this.value)">
               <option value="">全部店铺</option>
-              ${((state.data && state.data.stores) || []).map(s => `
-                <option value="${s.storePk}" ${state.storePk === s.storePk ? 'selected' : ''}>${esc(s.storeName || ('#' + s.storePk))}</option>`).join('')}
             </select>
             <button class="btn btn-sm btn-ghost" onclick="AdMonitorPage.refresh()">
               <i data-lucide="rotate-cw" style="width:14px;height:14px;"></i> 刷新
@@ -139,6 +137,22 @@ const AdMonitorPage = (() => {
             </button>
           </div>
         </div>
+        <style>
+          .admon-table { table-layout: fixed; border-collapse: collapse; }
+          .admon-table th, .admon-table td {
+            padding: 10px 12px; border-bottom: 1px solid #eaecf0; vertical-align: top;
+            overflow-wrap: anywhere; word-break: break-word;
+          }
+          .admon-table th { font-weight: 600; color: #475467; background: #f9fafb; }
+          .admon-table th:nth-child(1), .admon-table td:nth-child(1) { width: 30%; white-space: normal; }
+          .admon-table th:nth-child(2), .admon-table td:nth-child(2) { width: 11%; }
+          .admon-table th:nth-child(3), .admon-table td:nth-child(3),
+          .admon-table th:nth-child(4), .admon-table td:nth-child(4),
+          .admon-table th:nth-child(7), .admon-table td:nth-child(7) { width: 7%; }
+          .admon-table th:nth-child(5), .admon-table td:nth-child(5) { width: 9%; }
+          .admon-table th:nth-child(6), .admon-table td:nth-child(6) { width: 11%; }
+          .admon-table th:nth-child(8), .admon-table td:nth-child(8) { width: 18%; }
+        </style>
         <div id="amBanner"></div>
         <div id="amBody"><div style="padding:40px;text-align:center;color:#98a2b3;">加载中…</div></div>
       </div>`;
@@ -296,7 +310,7 @@ const AdMonitorPage = (() => {
             <span style="font-size:12px;color:#98a2b3;">${items.length} 个商品</span>
           </div>
           <div style="overflow:auto;border:1px solid #e4e7ec;border-radius:12px;background:#fff;">
-            <table class="collect-table" style="width:100%;font-size:13px;">
+            <table class="admon-table" style="width:100%;font-size:13px;">
               <thead><tr>
                 <th style="text-align:left;">商品</th>
                 <th style="text-align:left;">店铺</th>
@@ -344,7 +358,7 @@ const AdMonitorPage = (() => {
         单店当日花费达到 <strong>${money(threshold)}</strong> 即触发弹窗告警。
       </p>
       <div style="overflow:auto;border:1px solid #e4e7ec;border-radius:12px;background:#fff;">
-        <table class="collect-table" style="width:100%;font-size:13px;">
+        <table class="admon-table" style="width:100%;font-size:13px;">
           <thead><tr>
             <th style="text-align:left;">店铺</th>
             <th style="text-align:left;">店铺ID</th>
@@ -388,7 +402,7 @@ const AdMonitorPage = (() => {
     };
     box.innerHTML = `
       <div style="overflow:auto;border:1px solid #e4e7ec;border-radius:12px;background:#fff;max-height:600px;">
-        <table class="collect-table" style="width:100%;font-size:13px;">
+        <table class="admon-table" style="width:100%;font-size:13px;">
           <thead><tr>
             <th style="text-align:left;">活动名称</th>
             <th style="text-align:left;">店铺</th>
@@ -651,12 +665,30 @@ const AdMonitorPage = (() => {
 
   // ======================= 对外 =======================
 
+  function paintStoreFilter(d) {
+    const sel = document.getElementById('amStoreFilter');
+    if (!sel) return;
+    const stores = (d && d.stores) || [];
+    sel.innerHTML = '<option value="">全部店铺</option>' + stores.map(s => {
+      const pk = s.storePk;
+      const label = s.storeName || ('#' + pk);
+      const selected = state.storePk === pk ? ' selected' : '';
+      return `<option value="${pk}"${selected}>${esc(label)}</option>`;
+    }).join('');
+    if (state.storePk && !stores.some(s => s.storePk === state.storePk)) {
+      // 该店不在可见范围（账号隔离/已解绑）：回退到全部并重载
+      state.storePk = null;
+      sel.value = '';
+    }
+  }
+
   async function refresh() {
     const d = await load();
     if (!d) return;
     await fetchDailyAlerts();
     const banner = document.getElementById('amBanner');
     if (banner) banner.innerHTML = renderBanner(d);
+    paintStoreFilter(d);
     const body = document.getElementById('amBody');
     if (body) {
       body.innerHTML = renderStats(d) + renderTabs() + renderBody();
