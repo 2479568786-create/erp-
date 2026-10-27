@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS stores (
     perf_client_secret TEXT,                           -- Ozon Performance API client_secret（加密存储）
     perf_token      TEXT,                              -- Performance API Bearer Token 缓存（有效期 1800 秒）
     perf_token_expires_at TEXT,                        -- Token 过期时间（提前 5 分钟续签）
-    ad_monitor_enabled INTEGER NOT NULL DEFAULT 1,     -- 是否纳入 AI 广告监控 (0=关, 1=开)
+    ad_monitor_enabled INTEGER NOT NULL DEFAULT 0,     -- 是否纳入 AI 广告监控 (0=关, 1=开)
     created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT    NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE

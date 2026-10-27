@@ -133,7 +133,7 @@ def _run_migrations(conn):
         ("perf_client_secret", "TEXT"),
         ("perf_token", "TEXT"),
         ("perf_token_expires_at", "TEXT"),
-        ("ad_monitor_enabled", "INTEGER NOT NULL DEFAULT 1"),
+        ("ad_monitor_enabled", "INTEGER NOT NULL DEFAULT 0"),
     )
     for col_name, col_ddl in _perf_store_cols:
         if col_name not in stores_cols:
