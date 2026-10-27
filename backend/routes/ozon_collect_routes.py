@@ -38,6 +38,12 @@ IMAGE_WORKERS = 4
 USER_AGENT = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36')
 ALLOWED_EXT = {'jpg', 'jpeg', 'png', 'webp', 'gif'}
+# 采集图入库统一 JPEG 的参数（2026-10-28 定）
+# 线上实测：uploads 614 张图长边最大 1445（p50 1360），体积 1.1GB —— 全是 PNG 存照片
+# 导致（中位 1.9MB）；同分辨率转 JPEG q90 中位 224KB（约 0.12x），像素不损失。
+MAX_IMAGE_SIDE = 1600        # 长边上限，超过才缩放
+JPEG_QUALITY = 90
+JPEG_PASSTHROUGH_BYTES = 1200000  # 已是 JPEG 且 ≤1.2MB 时不再二次压缩，避免画质叠加损失
 
 
 # ---------------------------------------------------------------- 基础工具
@@ -150,10 +156,67 @@ def _download_image(url):
     return data, ext
 
 
+def _normalize_collected_image(data, ext):
+    """采集图入库前统一成 JPEG（长边 ≤1600，q90），返回 (bytes, ext)。
+
+    2026-10-28 线上实测：`data/uploads` 614 张图长边最大 1445、p50 1360，
+    体积却有 1.1GB —— 全是 PNG 存照片（中位 1.9MB），与该分辨率不匹配。
+    同分辨率转 JPEG q90 中位 224KB（≈0.12x），像素不变、页面与参考图链路都快。
+
+    规则（只影响新采集，历史图不动）：
+    - 动图（多帧 GIF/WebP）原样保留，避免丢帧
+    - 已是 JPEG、长边 ≤1600 且 ≤1.2MB、无 EXIF 旋转时原样返回，避免二次压缩叠加损失
+    - 有透明通道铺白底；EXIF 方向先转正；CMYK/P/16bit 统一转 RGB
+    - 转完比原图还大就保留原图（小尺寸纯色 PNG 会这样）
+    - 任何异常一律回退原图，绝不因为压缩让采集失败
+    """
+    try:
+        import io
+
+        from PIL import Image, ImageOps
+    except Exception:
+        return data, ext
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            if getattr(im, 'n_frames', 1) > 1:
+                return data, ext
+            try:
+                orientation = im.getexif().get(274, 1)
+            except Exception:
+                orientation = 1
+            im = ImageOps.exif_transpose(im)
+            width, height = im.size
+            longest = max(width, height)
+            if (ext in ('jpg', 'jpeg') and longest <= MAX_IMAGE_SIDE
+                    and len(data) <= JPEG_PASSTHROUGH_BYTES and im.mode == 'RGB'
+                    and orientation in (None, 1)):
+                return data, ext
+            if im.mode in ('RGBA', 'LA') or (im.mode == 'P' and 'transparency' in im.info):
+                rgba = im.convert('RGBA')
+                canvas = Image.new('RGB', rgba.size, (255, 255, 255))
+                canvas.paste(rgba, mask=rgba.split()[-1])
+                im = canvas
+            else:
+                im = im.convert('RGB')
+            if longest > MAX_IMAGE_SIDE:
+                ratio = MAX_IMAGE_SIDE / float(longest)
+                im = im.resize((max(1, int(round(width * ratio))),
+                                max(1, int(round(height * ratio)))), Image.LANCZOS)
+            buf = io.BytesIO()
+            im.save(buf, format='JPEG', quality=JPEG_QUALITY, optimize=True, progressive=True)
+            converted = buf.getvalue()
+        if not converted or len(converted) >= len(data):
+            return data, ext
+        return converted, 'jpg'
+    except Exception:
+        return data, ext
+
+
 def _host_image(url):
     """下载并托管到 ERP /uploads，返回公网 URL。失败抛异常。"""
     from services.storage_service import save_image
     data, ext = _download_image(url)
+    data, ext = _normalize_collected_image(data, ext)
     hosted = save_image(data, ext)
     if not hosted:
         raise ValueError('托管返回空 URL')
