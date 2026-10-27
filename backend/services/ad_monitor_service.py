@@ -318,14 +318,18 @@ def _persist_sku_stats(store_pk, store_id, rows) -> int:
 
 
 def _norm_date(value) -> str:
-    """报表日期归一化为 YYYY-MM-DD（兼容 2026-09-13 / 13.09.2026 / RFC3339）。"""
+    """报表日期归一化为 YYYY-MM-DD（兼容 2026-09-13 / 13.09.2026 / RFC3339）。
+
+    注意：正则必须用单反斜杠的 d（历史版本误写成双反斜杠，会匹配字面量，
+    导致点号日期 13.09.2026 原样落库，日表按 BETWEEN 过滤时全部落空）。
+    """
     s = str(value or '').strip()
     if not s:
         return ''
-    m = re.match(r'^(\\d{4})-(\\d{2})-(\\d{2})', s)
+    m = re.match(r'^(\d{4})-(\d{2})-(\d{2})', s)
     if m:
         return '%s-%s-%s' % m.groups()
-    m = re.match(r'^(\\d{2})\\.(\\d{2})\\.(\\d{4})', s)
+    m = re.match(r'^(\d{2})\.(\d{2})\.(\d{4})', s)
     if m:
         d, mo, y = m.groups()
         return '%s-%s-%s' % (y, mo, d)

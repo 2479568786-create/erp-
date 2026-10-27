@@ -295,3 +295,36 @@ def ai_generate():
         return success_response(data={'result': result, 'type': 'listing'}, msg='生成成功')
 
     return success_response(data={'result': result, 'type': gen_type}, msg='生成成功')
+
+@model_bp.route('/ai/analyze-product-images', methods=['POST'])
+@handle_errors
+def analyze_product_images():
+    """Read collected product images with DeepSeek Flash vision; never returns credentials."""
+    body = request.get_json(silent=True) or {}
+    images = body.get('images')
+    if not isinstance(images, list) or not 1 <= len(images) <= 30:
+        return error_response(msg='请提供 1 到 30 张商品图片', code=400)
+    allowed_prefixes = ('data:image/jpeg;base64,', 'data:image/png;base64,', 'data:image/webp;base64,')
+    if any(not isinstance(image, str) or not image.startswith(allowed_prefixes) for image in images):
+        return error_response(msg='图片格式无效，仅支持 JPEG、PNG 或 WebP', code=400)
+    if any(len(image) > 6 * 1024 * 1024 for image in images) or sum(map(len, images)) > 40 * 1024 * 1024:
+        return error_response(msg='图片数据过大，请减少图片或重新加载图片', code=413)
+    attributes = body.get('attributes') or []
+    if not isinstance(attributes, (list, dict)):
+        return error_response(msg='商品属性格式无效', code=400)
+
+    from services.ai_service import AIService
+
+    try:
+        result = AIService.analyze_product_images(body.get('title', ''), attributes, images)
+    except RuntimeError as exc:
+        return error_response(msg=str(exc), code=400)
+    except Exception as exc:
+        return error_response(msg=f'视觉分析失败: {exc}', code=500)
+    return success_response(data={
+        'result': result,
+        'provider': 'deepseek',
+        'model': 'deepseek-flash',
+        'image_count': len(images),
+    }, msg='商品图片视觉分析完成')
+

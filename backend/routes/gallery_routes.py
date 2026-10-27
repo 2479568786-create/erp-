@@ -1,9 +1,11 @@
-"""图库与 AI 图片生成 API。"""
-import base64
+"""图库与 AI 图片生成 API。
+
+生图只走凌科 AI（JLC / banana-2.1）：apiyi / apiyi_banana / yyds / PixPix 已于 2026-10-28 下线。
+计费闸门与扣点由 services/image_billing_guard.py 在应用层统一处理（路由内不扣点，避免重复扣费）。
+"""
 import json
 import os
 import re
-import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime
@@ -12,14 +14,23 @@ from flask import Blueprint, request, send_from_directory
 
 from config import DATA_DIR, Config
 from db import execute, query
-from services.ai_config_service import get_ai_config
 from services import jlc_media_service
 from utils.response import success_response, error_response, handle_errors
+from utils.auth import get_current_user
+from services.watermark_service import prepare_generated_image, validate_generation_store
+from services.watermark_image import image_extension
 
 
 gallery_bp = Blueprint('gallery', __name__)
 GALLERY_DIR = os.path.join(DATA_DIR, 'gallery')
 os.makedirs(GALLERY_DIR, exist_ok=True)
+# The gallery is persistent data and may have been restored from an archive with
+# file-like permissions (for example 0640). A directory needs the execute bit
+# for its owner to create and open files inside it.
+try:
+    os.chmod(GALLERY_DIR, 0o750)
+except OSError:
+    pass
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
 
 
@@ -44,28 +55,34 @@ def _row_to_dict(row):
     return item
 
 
-def _create_asset(filename, original_name, size, source='upload', prompt='', tags=None, generation_meta=None):
-    generation_meta = generation_meta or {}
+def _folder_to_dict(row):
+    item = dict(row)
+    item['id'] = str(item['id'])
+    item['asset_count'] = int(item.get('asset_count') or 0)
+    return item
+
+
+def _create_asset(filename, original_name, size, source='upload', prompt='', tags=None, user_id=None,
+                  provider='', model='', endpoint='', reference_count=0, template_version=''):
+    user_id = user_id or (get_current_user() or {}).get('id')
+    if not user_id:
+        raise ValueError('无法确定图库所属账号，请重新登录')
     asset_id = execute(
         """INSERT INTO gallery_assets
-           (filename, original_name, title, mime_type, file_size, source, prompt,
-            provider, model, endpoint, reference_count, template_version,
-            tags, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (filename, original_name, os.path.splitext(original_name)[0],
+           (user_id, filename, original_name, title, mime_type, file_size, source, prompt, tags,
+            provider, model, endpoint, reference_count, template_version, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (user_id, filename, original_name, os.path.splitext(original_name)[0],
          f"image/{os.path.splitext(filename)[1].lower().lstrip('.').replace('jpg', 'jpeg')}",
-         size, source, prompt,
-         str(generation_meta.get('provider') or ''),
-         str(generation_meta.get('model') or ''),
-         str(generation_meta.get('endpoint') or ''),
-         int(generation_meta.get('reference_count') or 0),
-         str(generation_meta.get('template_version') or ''),
-         json.dumps(tags or [], ensure_ascii=False), _now(), _now()),
+         size, source, prompt, json.dumps(tags or [], ensure_ascii=False),
+         provider or '', model or '', endpoint or '', int(reference_count or 0),
+         str(template_version or ''), _now(), _now()),
     )
     return _row_to_dict(query('SELECT * FROM gallery_assets WHERE id = ?', (asset_id,), one=True))
 
 
-def _save_bytes(data, original_name, source='upload', prompt='', tags=None, generation_meta=None):
+def _save_bytes(data, original_name, source='upload', prompt='', tags=None,
+                provider='', model='', endpoint='', reference_count=0, template_version=''):
     if len(data) > Config.MAX_IMAGE_SIZE:
         raise ValueError('图片超过 10MB 限制')
     ext = os.path.splitext(original_name)[1].lower().lstrip('.')
@@ -74,83 +91,9 @@ def _save_bytes(data, original_name, source='upload', prompt='', tags=None, gene
     filename = f"{uuid.uuid4().hex}.{ext}"
     with open(os.path.join(GALLERY_DIR, filename), 'wb') as file:
         file.write(data)
-    return _create_asset(filename, _safe_name(original_name), len(data), source, prompt, tags, generation_meta)
-
-
-def _extract_apiyi_image_items(result, count):
-    message = ((result.get('choices') or [{}])[0].get('message') or {})
-    content = message.get('content') or ''
-    candidates = []
-
-    def add(value):
-        if not isinstance(value, str):
-            return
-        value = value.strip().rstrip('.,;')
-        if value.startswith('data:image/'):
-            candidates.append({'b64_json': value})
-        elif value.startswith(('https://', 'http://')):
-            candidates.append({'url': value})
-
-    if isinstance(content, list):
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            add(part.get('text'))
-            add(part.get('url'))
-            image_url = part.get('image_url')
-            add(image_url.get('url') if isinstance(image_url, dict) else image_url)
-    else:
-        for match in re.finditer(r'!\[[^\]]*\]\((data:image/[^)]+|https?://[^)\s]+)\)', str(content)):
-            add(match.group(1))
-        if not candidates:
-            add(str(content))
-
-    unique = []
-    seen = set()
-    for item in candidates:
-        key = item.get('url') or item.get('b64_json')
-        if key not in seen:
-            seen.add(key)
-            unique.append(item)
-    return unique[:count]
-
-
-def _build_apiyi_image_content(prompt, reference_images):
-    content = [{'type': 'text', 'text': prompt}]
-    content.extend({'type': 'image_url', 'image_url': {'url': image}} for image in reference_images)
-    return content
-
-
-def _build_image_edit_multipart(model, prompt, size, reference_image):
-    """构造 OpenAI 图片编辑协议的 multipart 请求，确保参考图真正进入模型。"""
-    boundary = f'----OzonImageEdit{uuid.uuid4().hex}'
-    mime_header, encoded = reference_image.split(',', 1)
-    mime_type = mime_header.split(';', 1)[0].replace('data:', '') or 'image/png'
-    image_data = base64.b64decode(encoded)
-    chunks = []
-
-    def add_field(name, value):
-        chunks.extend([
-            f'--{boundary}\r\n'.encode(),
-            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode(),
-            str(value).encode('utf-8'),
-            b'\r\n',
-        ])
-
-    add_field('model', model)
-    add_field('prompt', prompt)
-    add_field('size', size)
-    add_field('n', 1)
-    extension = mime_type.split('/', 1)[-1].replace('jpeg', 'jpg')
-    chunks.extend([
-        f'--{boundary}\r\n'.encode(),
-        f'Content-Disposition: form-data; name="image"; filename="reference.{extension}"\r\n'.encode(),
-        f'Content-Type: {mime_type}\r\n\r\n'.encode(),
-        image_data,
-        b'\r\n',
-        f'--{boundary}--\r\n'.encode(),
-    ])
-    return b''.join(chunks), f'multipart/form-data; boundary={boundary}'
+    return _create_asset(filename, _safe_name(original_name), len(data), source, prompt, tags,
+                         provider=provider, model=model, endpoint=endpoint,
+                         reference_count=reference_count, template_version=template_version)
 
 
 @gallery_bp.route('/gallery', methods=['GET'])
@@ -159,7 +102,10 @@ def list_gallery():
     keyword = request.args.get('keyword', '').strip()
     source = request.args.get('source', '').strip()
     favorite = request.args.get('favorite', '').strip()
-    conditions, params = [], []
+    user_id = (get_current_user() or {}).get('id')
+    if not user_id:
+        return error_response('请先登录', 401)
+    conditions, params = ['user_id = ?'], [user_id]
     if keyword:
         conditions.append('(title LIKE ? OR original_name LIKE ? OR tags LIKE ? OR prompt LIKE ?)')
         params.extend([f'%{keyword}%'] * 4)
@@ -173,6 +119,88 @@ def list_gallery():
     return success_response(data={'list': [_row_to_dict(row) for row in rows], 'total': len(rows)})
 
 
+@gallery_bp.route('/gallery/folders', methods=['GET'])
+@handle_errors
+def list_gallery_folders():
+    user_id = (get_current_user() or {}).get('id')
+    if not user_id:
+        return error_response('请先登录', 401)
+    rows = query(
+        """SELECT f.*, COUNT(fa.asset_id) AS asset_count
+           FROM gallery_folders f
+           LEFT JOIN gallery_folder_assets fa ON fa.folder_id = f.id
+           WHERE f.user_id = ?
+           GROUP BY f.id
+           ORDER BY f.created_at DESC""",
+        (user_id,),
+    )
+    return success_response(data={'list': [_folder_to_dict(row) for row in rows], 'total': len(rows)})
+
+
+@gallery_bp.route('/gallery/folders', methods=['POST'])
+@handle_errors
+def create_gallery_folder():
+    user_id = (get_current_user() or {}).get('id')
+    if not user_id:
+        return error_response('请先登录', 401)
+    body = request.get_json(silent=True) or {}
+    raw_name = str(body.get('name') or '').strip()
+    name = _safe_name(raw_name)
+    asset_ids = body.get('asset_ids')
+    if not raw_name or not name:
+        return error_response('请输入套图文件夹名称', 400)
+    if not isinstance(asset_ids, list) or not asset_ids:
+        return error_response('请选择至少一张套图图片', 400)
+    try:
+        asset_ids = list(dict.fromkeys(int(asset_id) for asset_id in asset_ids))
+    except (TypeError, ValueError):
+        return error_response('套图图片标识不正确', 400)
+    placeholders = ','.join('?' for _ in asset_ids)
+    owned = query(
+        f'SELECT id FROM gallery_assets WHERE user_id = ? AND id IN ({placeholders})',
+        [user_id, *asset_ids],
+    )
+    owned_ids = {int(row['id']) for row in owned}
+    if len(owned_ids) != len(asset_ids):
+        return error_response('套图中包含不存在或无权访问的图片', 403)
+    folder_id = execute(
+        'INSERT INTO gallery_folders (user_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)',
+        (user_id, name, _now(), _now()),
+    )
+    for position, asset_id in enumerate(asset_ids):
+        execute(
+            'INSERT INTO gallery_folder_assets (folder_id, asset_id, position) VALUES (?, ?, ?)',
+            (folder_id, asset_id, position),
+        )
+    folder = query(
+        'SELECT f.*, COUNT(fa.asset_id) AS asset_count FROM gallery_folders f '
+        'LEFT JOIN gallery_folder_assets fa ON fa.folder_id = f.id WHERE f.id = ? GROUP BY f.id',
+        (folder_id,), one=True,
+    )
+    return success_response(data=_folder_to_dict(folder), msg='套图文件夹已保存')
+
+
+@gallery_bp.route('/gallery/folders/<int:folder_id>', methods=['GET'])
+@handle_errors
+def get_gallery_folder(folder_id):
+    user_id = (get_current_user() or {}).get('id')
+    if not user_id:
+        return error_response('请先登录', 401)
+    folder = query('SELECT * FROM gallery_folders WHERE id = ? AND user_id = ?', (folder_id, user_id), one=True)
+    if not folder:
+        return error_response('套图文件夹不存在', 404)
+    assets = query(
+        """SELECT a.* FROM gallery_folder_assets fa
+           JOIN gallery_assets a ON a.id = fa.asset_id
+           WHERE fa.folder_id = ? AND a.user_id = ?
+           ORDER BY fa.position ASC, a.created_at ASC""",
+        (folder_id, user_id),
+    )
+    data = _folder_to_dict({**folder, 'asset_count': len(assets)})
+    data['assets'] = [_row_to_dict(row) for row in assets]
+    return success_response(data=data)
+
+
 @gallery_bp.route('/gallery/upload', methods=['POST'])
 @handle_errors
 def upload_gallery():
@@ -183,19 +211,12 @@ def upload_gallery():
     source = request.form.get('source', 'upload').strip()
     source = source if source in ('upload', 'ai') else 'upload'
     prompt = request.form.get('prompt', '').strip()[:10000]
-    generation_meta = {
-        'provider': request.form.get('provider', '').strip(),
-        'model': request.form.get('model', '').strip(),
-        'endpoint': request.form.get('endpoint', '').strip(),
-        'reference_count': request.form.get('reference_count', '0').strip() or 0,
-        'template_version': request.form.get('template_version', '').strip(),
-    }
     assets = []
     for uploaded in files[:30]:
         ext = os.path.splitext(uploaded.filename or '')[1].lower().lstrip('.')
         if ext not in ALLOWED_EXTENSIONS:
             return error_response(f'不支持的图片格式: {uploaded.filename}', 400)
-        assets.append(_save_bytes(uploaded.read(), uploaded.filename, source=source, prompt=prompt, tags=tags, generation_meta=generation_meta))
+        assets.append(_save_bytes(uploaded.read(), uploaded.filename, source=source, prompt=prompt, tags=tags))
     return success_response(data=assets, msg=f'已上传 {len(assets)} 张图片')
 
 
@@ -213,15 +234,17 @@ def update_gallery(asset_id):
     if not allowed:
         return error_response('没有可更新字段', 400)
     sets = [f'{key} = ?' for key in allowed] + ['updated_at = ?']
-    execute(f"UPDATE gallery_assets SET {', '.join(sets)} WHERE id = ?", list(allowed.values()) + [_now(), asset_id])
-    row = query('SELECT * FROM gallery_assets WHERE id = ?', (asset_id,), one=True)
+    user_id = (get_current_user() or {}).get('id')
+    execute(f"UPDATE gallery_assets SET {', '.join(sets)} WHERE id = ? AND user_id = ?", list(allowed.values()) + [_now(), asset_id, user_id])
+    row = query('SELECT * FROM gallery_assets WHERE id = ? AND user_id = ?', (asset_id, user_id), one=True)
     return success_response(data=_row_to_dict(row), msg='素材已更新') if row else error_response('素材不存在', 404)
 
 
 @gallery_bp.route('/gallery/<int:asset_id>', methods=['DELETE'])
 @handle_errors
 def delete_gallery(asset_id):
-    row = query('SELECT * FROM gallery_assets WHERE id = ?', (asset_id,), one=True)
+    user_id = (get_current_user() or {}).get('id')
+    row = query('SELECT * FROM gallery_assets WHERE id = ? AND user_id = ?', (asset_id, user_id), one=True)
     if not row:
         return error_response('素材不存在', 404)
     path = os.path.join(GALLERY_DIR, row['filename'])
@@ -232,7 +255,7 @@ def delete_gallery(asset_id):
             # Windows may briefly lock a file that was just previewed/downloaded.
             # Metadata deletion should still succeed; orphan cleanup can remove it later.
             print(f'[图库] 文件暂时无法删除 {path}: {exc}')
-    execute('DELETE FROM gallery_assets WHERE id = ?', (asset_id,))
+    execute('DELETE FROM gallery_assets WHERE id = ? AND user_id = ?', (asset_id, user_id))
     return success_response(msg='素材已删除')
 
 
@@ -241,16 +264,46 @@ def gallery_file(filename):
     return send_from_directory(GALLERY_DIR, os.path.basename(filename))
 
 
+JLC_MODEL = 'banana-2.1'
+JLC_ASPECT = {
+    '1024x1024': '1:1',
+    '1536x1024': '3:2',
+    '1024x1360': '3:4',
+    '1024x1365': '3:4',
+    '1024x1536': '2:3',
+}
+
+
+def _download_generated_image(url):
+    request = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(request, timeout=120) as response:
+        return response.read(Config.MAX_IMAGE_SIZE + 1)
+
+
 @gallery_bp.route('/ai/images/generate', methods=['POST'])
 @handle_errors
 def generate_ai_images():
+    """单张/多张生图：只走凌科 AI（JLC / banana-2.1）。
+
+    2026-10-27 用户拍板：生图只认凌科 AI，apiyi / apiyi_banana / yyds / PixPix 已下线；
+    请求里的 provider / model 参数不再生效。
+    计费闸门与扣点由 services/image_billing_guard.py 在应用层统一处理。
+    """
     body = request.get_json(silent=True) or {}
+    try:
+        store_id = int(body.get('store_id') or 0)
+    except (TypeError, ValueError):
+        store_id = 0
+    if store_id > 0:
+        validate_generation_store(store_id, get_current_user())
     prompt = str(body.get('prompt') or '').strip()
     if not prompt:
         return error_response('请输入图片描述', 400)
-    count = min(max(int(body.get('count') or 1), 1), 4)
-    size = body.get('size') if body.get('size') in ('1024x1024', '1536x1024', '1024x1360', '1024x1365', '1024x1536') else '1024x1024'
-    size = '1024x1360' if size == '1024x1365' else size
+    try:
+        count = min(max(int(body.get('count') or 1), 1), 4)
+    except (TypeError, ValueError):
+        count = 1
+    size = body.get('size') if body.get('size') in JLC_ASPECT else '1024x1024'
     reference_image = body.get('reference_image')
     reference_images = body.get('reference_images')
     if reference_images is not None:
@@ -265,142 +318,68 @@ def generate_ai_images():
         return error_response('参考图格式不正确，请重新上传图片', 400)
     if reference_image and len(reference_image) > 14 * 1024 * 1024:
         return error_response('参考图不能超过 10MB', 400)
-    provider_key = str(body.get('provider') or '').strip() or None
-    config = get_ai_config(provider_key)
-    if not config.get('api_key') or not config.get('base_url'):
-        return error_response('请先在模型管理配置支持图片生成的 API', 400)
-    model = str(body.get('model') or 'gpt-image-1').strip()
-    is_apiyi_image = config.get('provider') == 'apiyi' or model in {'gpt-image-2.5-all', 'gpt-image-2-all'}
-    is_apiyi_banana = config.get('provider') == 'apiyi_banana'
-    is_yyds_image = config.get('provider') == 'yyds'
-    is_lingkeai = config.get('provider') == 'lingkeai'
-    if is_apiyi_banana:
-        ratio = {'1024x1360': '3:4', '1024x1365': '3:4', '1024x1536': '2:3', '1536x1024': '3:2'}.get(size, '1:1')
-        parts = [{'text': prompt}]
-        for current_reference in (reference_images or ([reference_image] if reference_image else [])):
-            mime_type, image_data = current_reference.split(',', 1)
-            parts.append({'inlineData': {'mimeType': mime_type.split(';', 1)[0].replace('data:', ''), 'data': image_data}})
-        payload = {
-            'contents': [{'parts': parts}],
-            'generationConfig': {
-                'responseModalities': ['IMAGE'],
-                'imageConfig': {'aspectRatio': ratio, 'imageSize': '1K'},
-            },
-        }
-        endpoint = config['base_url'].rstrip('/') + f'/v1beta/models/{model}:generateContent'
-    elif is_apiyi_image:
-        message_content = _build_apiyi_image_content(
-            prompt,
-            reference_images or ([reference_image] if reference_image else []),
-        )
-        payload = {
-            'model': model,
-            'messages': [{'role': 'user', 'content': message_content}],
-        }
-        endpoint = config['base_url'].rstrip('/') + '/chat/completions'
-    elif is_yyds_image and reference_image:
-        yyds_size = {'1024x1360': '1008x1344', '1024x1365': '1008x1344'}.get(size, size)
-        payload = {
-            'model': model,
-            'prompt': prompt,
-            'size': yyds_size,
-            'images': [{'image_url': reference_image}],
-            'response_format': 'url',
-        }
-        endpoint = config['base_url'].rstrip('/') + '/images/edits'
-    elif is_lingkeai and reference_image:
-        payload, content_type = _build_image_edit_multipart(model, prompt, size, reference_image)
-        endpoint = config['base_url'].rstrip('/') + '/images/edits'
-    else:
-        payload = {'model': model, 'prompt': prompt, 'n': count, 'size': size}
-        endpoint = config['base_url'].rstrip('/') + '/images/generations'
-    generation_meta = {
-        'provider': config.get('provider') or provider_key or '',
-        'model': model,
-        'endpoint': endpoint,
-        'reference_count': len(reference_images or ([reference_image] if reference_image else [])),
-        'template_version': str(body.get('template_version') or 'single-v2'),
-    }
-    if is_lingkeai and reference_image:
-        request_body = payload
-        request_content_type = content_type
-    else:
-        request_body = json.dumps(payload).encode('utf-8')
-        request_content_type = 'application/json'
-    req = urllib.request.Request(
-        endpoint,
-        data=request_body,
-        headers={'Content-Type': request_content_type, 'Authorization': f"Bearer {config['api_key']}"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=180) as response:
-            result = json.loads(response.read().decode('utf-8'))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode('utf-8', errors='replace')[:500]
-        return error_response(f'图片模型调用失败 HTTP {exc.code}: {detail}', 502)
-    except urllib.error.URLError as exc:
-        return error_response(f'图片模型连接失败: {exc.reason}', 502)
 
-    if is_apiyi_banana:
-        result_items = []
-        for candidate in result.get('candidates') or []:
-            content = candidate.get('content') or {}
-            for part in content.get('parts') or []:
-                inline_data = part.get('inlineData') or {}
-                if inline_data.get('data'):
-                    result_items.append({'b64_json': inline_data['data']})
-    elif is_apiyi_image:
-        result_items = _extract_apiyi_image_items(result, count)
-        if not result_items:
-            choices = result.get('choices') or []
-            message = (choices[0].get('message') or {}) if choices else {}
-            content = message.get('content') or ''
-            print(
-                '[AI图片] APIYI响应未识别到图片'
-                f" model={model} top_keys={sorted(result.keys())}"
-                f" choice_count={len(choices)} content_type={type(content).__name__}"
-                f" content_length={len(content) if isinstance(content, (str, list)) else 0}"
-                f" finish_reason={(choices[0].get('finish_reason') if choices else None)}"
-            )
-    else:
-        result_items = result.get('data') or []
-
+    images = reference_images or ([reference_image] if reference_image else [])
+    image_size = str(body.get('imageSize') or '2K').strip() or '2K'
+    template_version = str(body.get('template_version') or 'single-jlc-v1')
     assets = []
-    save_errors = []
-    for index, item in enumerate(result_items):
+    errors = []
+    model_used = JLC_MODEL
+    watermark_status = 'not_configured'
+    for index in range(count):
         try:
-            if item.get('b64_json'):
-                encoded = item['b64_json']
-                if isinstance(encoded, str) and ',' in encoded and encoded.startswith('data:'):
-                    encoded = encoded.split(',', 1)[1]
-                image_data = base64.b64decode(encoded)
-            elif item.get('url'):
-                image_request = urllib.request.Request(
-                    item['url'],
-                    headers={'User-Agent': 'Mozilla/5.0'},
+            result = jlc_media_service.generate_image(
+                prompt,
+                aspect_ratio=JLC_ASPECT.get(size, '3:4'),
+                image_size=image_size,
+                images=images,
+            )
+        except Exception as exc:  # noqa: BLE001 - 统一回可读错误
+            errors.append(str(exc)[:180])
+            break
+        model_used = result.get('model') or JLC_MODEL
+        for url_index, url in enumerate(result.get('urls') or [], start=1):
+            try:
+                image_data = _download_generated_image(url)
+                if store_id > 0:
+                    image_data, watermark_status = prepare_generated_image(
+                        image_data, store_id, get_current_user())
+                extension = image_extension(image_data)
+                asset = _save_bytes(
+                    image_data,
+                    'ai-%d-%d.%s' % (index + 1, url_index, extension),
+                    'ai',
+                    prompt,
+                    ['AI生成'],
+                    provider='jlc',
+                    model=model_used,
+                    endpoint='/v1/media/generate',
+                    reference_count=len(images),
+                    template_version=template_version,
                 )
-                with urllib.request.urlopen(image_request, timeout=60) as response:
-                    image_data = response.read(Config.MAX_IMAGE_SIZE + 1)
-            else:
-                continue
-            assets.append(_save_bytes(image_data, f'ai-{index + 1}.png', 'ai', prompt, ['AI生成'], generation_meta))
-        except Exception as exc:
-            save_errors.append(str(exc)[:180])
-            print(f'[AI图片] 保存第 {index + 1} 张失败: {exc}')
+                asset['watermark_status'] = watermark_status
+                assets.append(asset)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(str(exc)[:180])
+                print('[JLC单张] 下载/保存失败 %s: %s' % (url, exc))
+
     if not assets:
-        detail = f'；下载/保存错误: {save_errors[-1]}' if save_errors else ''
-        return error_response(f'模型未返回可保存的图片{detail}', 502)
-    return success_response(data={'assets': assets, 'model': model}, msg=f'已生成并保存 {len(assets)} 张图片')
+        detail = ('：' + errors[-1]) if errors else ''
+        return error_response('凌科 AI 生图失败' + detail, 502)
+    return success_response(
+        data={'assets': assets, 'provider': 'jlc', 'model': model_used,
+              'watermark_status': watermark_status},
+        msg='已生成并保存 %d 张图片' % len(assets),
+    )
 
 
 # ============================================================
-# JLC GLOBAL 生图（纳米香蕉 2.1）—— 人工提示词 + 参考图
-# 说明：本端点只做「提交任务 → 下载结果 → 落图库」，不参与任何 AI 规划/提示词生成。
+# JLC GLOBAL 生图（套图）—— 人工提示词 + 参考图，套图唯一出图入口
 # ============================================================
 @gallery_bp.route('/ai/suite/jlc', methods=['POST'])
 @handle_errors
 def generate_jlc_suite_image():
-    """按人工提示词 + 参考图生成单张套图并保存到图库。"""
+    """按人工提示词 + 参考图生成单张套图并保存到图库（只走凌科 AI）。"""
     body = request.get_json(silent=True) or {}
     prompt = (body.get('prompt') or '').strip()
     if not prompt:
@@ -411,6 +390,12 @@ def generate_jlc_suite_image():
     images = body.get('images') or []
     if not isinstance(images, list):
         return error_response('images 必须是数组')
+    try:
+        store_id = int(body.get('store_id') or 0)
+    except (TypeError, ValueError):
+        store_id = 0
+    if store_id > 0:
+        validate_generation_store(store_id, get_current_user())
 
     try:
         result = jlc_media_service.generate_image(
@@ -419,26 +404,27 @@ def generate_jlc_suite_image():
         return error_response('JLC 生图失败：%s' % exc)
 
     assets = []
+    watermark_status = 'not_configured'
     for index, url in enumerate(result.get('urls') or [], start=1):
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=90) as resp:
-                data = resp.read()
-            ext = 'jpg' if any(k in url.lower() for k in ('.jpg', '.jpeg')) else 'png'
-            assets.append(_save_bytes(
+            data = _download_generated_image(url)
+            if store_id > 0:
+                data, watermark_status = prepare_generated_image(data, store_id, get_current_user())
+            extension = image_extension(data)
+            asset = _save_bytes(
                 data,
-                'ai-suite-%s-%d.%s' % (module_key or 'img', index, ext),
-                source='ai',
-                prompt=prompt,
-                tags=['AI套图'] + ([module_key] if module_key else []),
-                generation_meta={
-                    'provider': 'jlc',
-                    'model': result.get('model') or 'banana-2.1',
-                    'endpoint': '/v1/media/generate',
-                    'reference_count': len(images),
-                    'template_version': 'suite-manual-%s' % (module_key or 'img'),
-                },
-            ))
+                'ai-suite-%s-%d.%s' % (module_key or 'img', index, extension),
+                'ai',
+                prompt,
+                ['AI套图'] + ([module_key] if module_key else []),
+                provider='jlc',
+                model=result.get('model') or JLC_MODEL,
+                endpoint='/v1/media/generate',
+                reference_count=len(images),
+                template_version='suite-manual-%s' % (module_key or 'img'),
+            )
+            asset['watermark_status'] = watermark_status
+            assets.append(asset)
         except Exception as exc:  # noqa: BLE001
             print('[JLC套图] 下载/保存失败 %s: %s' % (url, exc))
 
@@ -450,4 +436,7 @@ def generate_jlc_suite_image():
         'cost': result.get('cost'),
         'provider': 'jlc',
         'model': result.get('model'),
+        'watermark_status': watermark_status,
     })
+
+

@@ -15,7 +15,7 @@ from flask import request
 
 from db import query, execute
 from utils.response import error_response
-from utils.image_proxy import is_public_ozon_image_url
+from utils.image_proxy import is_public_image_url
 
 
 _PUBLIC_API_PATHS = {
@@ -23,17 +23,21 @@ _PUBLIC_API_PATHS = {
     '/api/user/info',
     '/api/health',
     '/api/config',
-    '/api/pixpix/oauth/callback',
 }
 
 
 def require_api_auth():
-    """Require a valid login token for API routes except public entry points."""
+    """Require a valid login token for API routes except public entry points.
+
+    插件端点（/api/ext/*）由各路由内部用 X-Ext-Key 自行鉴权，跳过全局登录校验。
+    """
     if not request.path.startswith('/api/') or request.method == 'OPTIONS':
         return None
     if request.path in _PUBLIC_API_PATHS:
         return None
-    if request.method == 'GET' and request.path == '/api/image_proxy' and is_public_ozon_image_url(request.args.get('url')):
+    if request.path.startswith('/api/ext/'):
+        return None
+    if request.path == '/api/image_proxy' and is_public_image_url(request.args.get('url')):
         return None
     if request.method == 'GET' and request.path.startswith('/api/gallery/files/'):
         return None

@@ -3,86 +3,25 @@
 定义商品、公告、发布任务、用户等核心数据结构
 提供 JSON 文件读写的基础数据访问方法
 """
-import glob
 import json
 import os
-import shutil
-import time
 import uuid
 import threading
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from config import Config
-
-try:
-    import fcntl  # POSIX 文件锁（Linux 生产环境）
-except ImportError:  # Windows 本地开发
-    fcntl = None
 
 
 class BaseModel:
     """基础模型，提供通用 CRUD 操作
 
-    一致性设计（线上事故修复）：
-    - 生产环境用 gunicorn 多 worker 部署（当前 --workers 2），**每个 worker 是独立进程**，
-      各自持有一份 _cache。threading.Lock 只在单进程内生效，因此必须解决两件事：
-      1) **跨进程可见性**：按文件变动刷新缓存，否则 A worker 写入的商品，
-         B worker 永远看不到 —— 典型症状就是"未找到商品 / 商品不存在，
-         多试几次又好了"（请求被负载均衡到"没见过这条数据"的 worker）。
-      2) **跨进程互斥 + 写前合并**：写盘前先重新加载，避免用陈旧快照整体覆盖，
-         把另一个 worker 刚写入的数据冲掉。
+    使用 threading.Lock 保护内存缓存和文件写入，避免多线程并发导致数据丢失。
+    注意：此锁仅保护单进程内的并发，多进程部署需额外使用文件锁。
     """
 
     FILE_PATH = ""  # 子类需指定数据文件路径
     _cache = {}     # 内存缓存
     _loaded = False
     _lock = threading.Lock()  # 类级线程锁，保护 _cache 和文件写入
-    _sig = None     # 最近一次读盘时的文件签名 (mtime_ns, size)
-
-    # ---------- 跨进程一致性 ----------
-
-    @classmethod
-    def _file_signature(cls):
-        """文件签名：用于判断磁盘上的数据是否已被其他进程改写"""
-        try:
-            st = os.stat(cls.FILE_PATH)
-            return (st.st_mtime_ns, st.st_size)
-        except OSError:
-            return None
-
-    @classmethod
-    @contextmanager
-    def _interprocess_lock(cls):
-        """跨进程排他文件锁（gunicorn 多 worker 必需）。Windows 下退化为无操作。"""
-        if fcntl is None or not cls.FILE_PATH:
-            yield
-            return
-        lock_path = cls.FILE_PATH + '.lock'
-        lock_file = None
-        try:
-            parent = os.path.dirname(lock_path)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            lock_file = open(lock_path, 'a+')
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        except OSError:
-            if lock_file:
-                lock_file.close()
-            yield
-            return
-        try:
-            yield
-        finally:
-            try:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            finally:
-                lock_file.close()
-
-    @classmethod
-    def _refresh_from_disk_if_changed(cls):
-        """若磁盘文件已被其他进程改写，则重新加载（调用方需持有 cls._lock）"""
-        if cls._file_signature() != cls._sig:
-            cls._load_from_file()
 
     @classmethod
     def _ensure_loaded(cls):
@@ -97,50 +36,15 @@ class BaseModel:
 
     @classmethod
     def _load_from_file(cls):
-        """从 JSON 文件加载数据（调用方需持有锁）
-
-        解析失败时**保留内存中已有的缓存**并打印告警：
-        过去这里直接置空 cls._cache，一旦读到不完整文件（例如写盘过程中被读），
-        就会把"空数据"当成真相继续回写，造成整库丢失。
-        """
-        if not os.path.exists(cls.FILE_PATH):
+        """从 JSON 文件加载数据（调用方需持有锁）"""
+        if os.path.exists(cls.FILE_PATH):
+            try:
+                with open(cls.FILE_PATH, 'r', encoding='utf-8') as f:
+                    cls._cache = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                cls._cache = []
+        else:
             cls._cache = []
-            cls._sig = cls._file_signature()
-            return
-        try:
-            with open(cls.FILE_PATH, 'r', encoding='utf-8') as f:
-                cls._cache = json.load(f)
-        except (json.JSONDecodeError, IOError) as e:
-            print(f'[{cls.__name__}] 读取 {cls.FILE_PATH} 失败，保留现有内存缓存: {e}')
-        cls._sig = cls._file_signature()
-
-    # 自动滚动备份：写盘前把"上一版"留一份，节流 15 分钟、保留最近 10 份。
-    # 这是数据安全网：无论因为多进程覆盖、误删还是代码缺陷，都还有得救。
-    BACKUP_INTERVAL_SECONDS = 900
-    BACKUP_KEEP = 10
-    _last_backup_at = 0
-
-    @classmethod
-    def _maybe_backup(cls):
-        """节流滚动备份（调用方需持有锁）"""
-        now = time.time()
-        if now - cls._last_backup_at < cls.BACKUP_INTERVAL_SECONDS:
-            return
-        if not os.path.exists(cls.FILE_PATH):
-            return
-        try:
-            stamp = time.strftime('%Y%m%d-%H%M%S')
-            dst = f'{cls.FILE_PATH}.autobak-{stamp}'
-            shutil.copy2(cls.FILE_PATH, dst)
-            cls._last_backup_at = now
-            olds = sorted(glob.glob(cls.FILE_PATH + '.autobak-*'))
-            for old in olds[:-cls.BACKUP_KEEP]:
-                try:
-                    os.remove(old)
-                except OSError:
-                    pass
-        except OSError as e:
-            print(f'[{cls.__name__}] 自动备份失败: {e}')
 
     @classmethod
     def _save_to_file(cls):
@@ -148,15 +52,11 @@ class BaseModel:
 
         采用先写临时文件再原子替换的策略，避免写入过程中崩溃导致数据损坏。
         """
-        cls._maybe_backup()
         tmp_path = cls.FILE_PATH + '.tmp'
         with open(tmp_path, 'w', encoding='utf-8') as f:
             json.dump(cls._cache, f, ensure_ascii=False, indent=2, default=str)
-            f.flush()
-            os.fsync(f.fileno())
-        # os.replace 是原子替换：读方要么看到旧文件、要么看到新文件，不会读到半截
+        # Windows 下 os.replace 可原子替换
         os.replace(tmp_path, cls.FILE_PATH)
-        cls._sig = cls._file_signature()
 
     @classmethod
     def generate_id(cls, prefix="id"):
@@ -173,7 +73,6 @@ class BaseModel:
         """查询全部记录，支持简单过滤"""
         cls._ensure_loaded()
         with cls._lock:
-            cls._refresh_from_disk_if_changed()
             items = list(cls._cache)
         if filters:
             for key, value in filters.items():
@@ -186,8 +85,6 @@ class BaseModel:
         """按 ID 查找单条记录"""
         cls._ensure_loaded()
         with cls._lock:
-            # 多 worker 部署下必须刷新，否则会查不到别的 worker 刚写入的记录
-            cls._refresh_from_disk_if_changed()
             for item in cls._cache:
                 if item.get('id') == item_id:
                     return item
@@ -198,30 +95,24 @@ class BaseModel:
         """创建新记录"""
         cls._ensure_loaded()
         with cls._lock:
-            with cls._interprocess_lock():
-                # 写前先合并其他 worker 的改动，避免用陈旧快照整体覆盖
-                cls._refresh_from_disk_if_changed()
-                data['id'] = cls.generate_id()
-                data['createdAt'] = cls.now_iso()
-                data['updatedAt'] = cls.now_iso()
-                cls._cache.append(data)
-                cls._save_to_file()
-                return data
+            data['id'] = cls.generate_id()
+            data['createdAt'] = cls.now_iso()
+            data['updatedAt'] = cls.now_iso()
+            cls._cache.append(data)
+            cls._save_to_file()
+            return data
 
     @classmethod
     def update(cls, item_id, update_data):
         """更新记录"""
         cls._ensure_loaded()
         with cls._lock:
-            with cls._interprocess_lock():
-                cls._refresh_from_disk_if_changed()
-                for i, item in enumerate(cls._cache):
-                    if item.get('id') == item_id:
-                        update_data = dict(update_data)
-                        update_data['updatedAt'] = cls.now_iso()
-                        cls._cache[i] = {**item, **update_data}
-                        cls._save_to_file()
-                        return cls._cache[i]
+            for i, item in enumerate(cls._cache):
+                if item.get('id') == item_id:
+                    update_data['updatedAt'] = cls.now_iso()
+                    cls._cache[i] = {**item, **update_data}
+                    cls._save_to_file()
+                    return cls._cache[i]
         return None
 
     @classmethod
@@ -229,13 +120,11 @@ class BaseModel:
         """删除记录"""
         cls._ensure_loaded()
         with cls._lock:
-            with cls._interprocess_lock():
-                cls._refresh_from_disk_if_changed()
-                original_len = len(cls._cache)
-                cls._cache = [item for item in cls._cache if item.get('id') != item_id]
-                if len(cls._cache) < original_len:
-                    cls._save_to_file()
-                    return True
+            original_len = len(cls._cache)
+            cls._cache = [item for item in cls._cache if item.get('id') != item_id]
+            if len(cls._cache) < original_len:
+                cls._save_to_file()
+                return True
         return False
 
     @classmethod

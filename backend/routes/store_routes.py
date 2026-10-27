@@ -23,11 +23,9 @@ def _owner_name_map():
 
 
 def _mask_store_for_response(store):
-    """掩码店铺的敏感凭据，避免泄露给前端。
+    """掩码店铺的 api_key，避免明文泄露给前端
 
-    - 商品 Seller API：api_key        → hasApiKey + '******'
-    - 广告 Performance API：perf_client_secret → hasPerfSecret，
-      perf_client_id 保留明文（它本身就是账号标识，非密钥），便于前端展示"已配置哪个账号"。
+    返回是否已设置（hasApiKey）而非真实密钥。
     """
     if not store:
         return store
@@ -35,13 +33,6 @@ def _mask_store_for_response(store):
     store['hasApiKey'] = bool(api_key)
     store['apiKey'] = '******' if api_key else ''
     store.pop('api_key', None)
-
-    perf_secret = store.get('perf_client_secret')
-    store['hasPerfSecret'] = bool(perf_secret)
-    store.pop('perf_client_secret', None)
-    # 缓存的广告 Token 属于内部凭据，不外发
-    store.pop('perf_token', None)
-    store.pop('perf_token_expires_at', None)
     return store
 
 

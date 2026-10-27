@@ -1,4 +1,4 @@
-﻿"""
+"""
 AI 服务模块
 封装 AI 内容生成能力（标题优化、描述生成、关键词推荐、多语言翻译等）
 使用真实 AI 提供商（通过 ai_config_service 配置）。未配置或调用失败时直接报错。
@@ -31,6 +31,77 @@ class AIService:
         return result
 
     @classmethod
+    def analyze_product_images(cls, title, attributes, images):
+        """Extract image-grounded product facts with the configured DeepSeek vision model."""
+        from services.ai_config_service import get_ai_config, call_text_model
+
+        config = get_ai_config('deepseek')
+        if not config.get('api_key'):
+            raise RuntimeError('DeepSeek API Key 未配置')
+        config['model'] = 'deepseek-flash'
+
+        text = (
+            '请分析这组 Ozon 商品图片，并参考随后提供的商品卡标题和属性。'
+            '只提取图片中能直接看到或读出的事实；图片无法证实的精确参数不要猜。'
+            '请提取商品原型：稳定的商品身份、外形/轮廓、颜色、材质外观、可见结构、接口/控制件和包装内可见配件；'
+            '将不能从图片确认的项目留空或列入不确定项，不得臆造。'
+            '另外分开描述图中可读俄语文案、图片可证实的商品事实，'
+            '并提取商品卖点特征与参数。参数要逐项列出名称、数值、单位及证据；只记录图片文字或商品卡明确支持的值，最多列出 30 项，'
+            '看不清或互相冲突的参数不要猜，放入不确定/冲突项。另给出仅由证据支持、自然地道的俄语短卖点。'
+            '可见事实最多 20 项，俄语卖点最多 8 项，保持 JSON 简洁，避免重复。'
+            '若图片营销字样与商品卡信息冲突，标记冲突而不是自行裁定。'
+            '仅输出 JSON 对象：{"product_prototype":{"identity":"...","form_factor":"...",'
+            '"silhouette":"...","colors":["..."],"materials_and_finish":["..."],'
+            '"visible_structure":["..."],"included_components":["..."],"must_preserve":["..."]},'
+            '"parameters":[{"name":"...","value":"...","unit":"...","evidence":"图片1/商品卡属性：..."}],'
+            '"observed_facts":[{"fact":"...","evidence":"图片1：..."}],'
+            '"ru_selling_points":[{"text":"...","supported_by":"..."}],'
+            '"uncertain_or_conflicting":["..."]}。\n'
+            f'商品标题：{str(title or "")[:800]}\n'
+            f'商品卡属性：{json.dumps(attributes or [], ensure_ascii=False)[:12000]}\n'
+            f'图片数量：{len(images)}。图片按传入顺序编号。'
+        )
+        content = [{'type': 'text', 'text': text}]
+        content.extend({
+            'type': 'image_url',
+            'image_url': {'url': image, 'detail': 'high'},
+        } for image in images)
+        raw_result = call_text_model(
+            config,
+            [{'role': 'user', 'content': content}],
+            temperature=0.2,
+            max_tokens=2200,
+            json_output=True,
+            timeout=60,
+            thinking={'type': 'disabled'},
+        )
+        text_result = str(raw_result or '').strip()
+        if text_result.startswith('```'):
+            text_result = text_result.removeprefix('```json').removeprefix('```JSON').removeprefix('```').strip()
+            if text_result.endswith('```'):
+                text_result = text_result[:-3].strip()
+        try:
+            parsed = json.loads(text_result)
+        except json.JSONDecodeError:
+            start, end = text_result.find('{'), text_result.rfind('}')
+            if start < 0 or end <= start:
+                if start >= 0 and text_result.count('{') > text_result.count('}'):
+                    raise RuntimeError('DeepSeek 返回的视觉分析 JSON 不完整或已截断；请重试或减少单批图片数')
+                raise RuntimeError('DeepSeek 返回的视觉分析不是有效 JSON；请重试或减少单批图片数')
+            try:
+                parsed = json.loads(text_result[start:end + 1])
+            except json.JSONDecodeError as exc:
+                raise RuntimeError('DeepSeek 返回的视觉分析 JSON 不完整或已截断；请重试或减少单批图片数') from exc
+        if not isinstance(parsed, dict) or not isinstance(parsed.get('product_prototype'), dict):
+            raise RuntimeError('DeepSeek 返回的视觉分析 JSON 缺少商品原型字段；请重试')
+        for field in ('parameters', 'observed_facts', 'ru_selling_points', 'uncertain_or_conflicting'):
+            if field not in parsed:
+                parsed[field] = []
+            if not isinstance(parsed[field], list):
+                raise RuntimeError(f'DeepSeek 返回的视觉分析 JSON 字段 {field} 格式错误；请重试')
+        return parsed
+
+    @classmethod
     def _call_ai(cls, content_type, text, params):
         """调用真实 AI 提供商的 API
 
@@ -39,7 +110,9 @@ class AIService:
         """
         from services.ai_config_service import get_ai_config
 
-        config = get_ai_config()
+        config = get_ai_config('deepseek' if content_type == 'image_prompts' else None)
+        if content_type == 'image_prompts':
+            config['model'] = 'deepseek-v4-pro'
         if not config.get('api_key'):
             raise RuntimeError('AI API Key 未配置')
 
@@ -57,6 +130,7 @@ class AIService:
                 temperature=0.7,
                 max_tokens=2000,
                 timeout=30,
+                thinking={'type': 'disabled'} if content_type == 'image_prompts' else None,
             ) or None
         except urllib.error.HTTPError as e:
             error_body = ''
@@ -152,6 +226,21 @@ class AIService:
                 '===俄语标题===\n...\n===中文标题===\n...\n===主题标签===\ntag1, tag2, tag3\n===俄语简介===\n...\n===中文简介===\n...\n===俄语详情===\n...\n===中文详情===\n...'
             )
             user_prompt = f'请基于以下商品信息生成完整 OZON Listing 文案：\n{text}'
+
+        elif content_type == 'image_prompts':
+            count = max(1, min(int(params.get('image_count') or 7), 8))
+            system_prompt = (
+                '你是电商商品摄影与图像生成提示词专家。根据商品标题、属性、视觉分析结果及用户要求编写提示词；'
+                '视觉分析中的商品原型是商品身份和外观的主要约束；事实和俄语卖点只能按其证据使用，'
+                '参数仅可取自商品属性或视觉模型明确读取出的值，禁止补造或换算。不得发明参数、配件、结构、品牌或商品无法确认的细节。'
+                '所有单图提示词需保持同一商品外观、颜色、比例和身份一致；每张图应有不同且明确的构图/展示目的。'
+                '默认生成适合俄罗斯 Ozon 商品页的图片：画面内卖点和参数文字使用自然、准确、简洁的俄语，禁止中文和英文。'
+                '只有有证据支持的卖点/参数才能制作为图片文字；参数须忠实保留原值和单位，不添加未经确认的信息。'
+                '提示词本身用中文编写，要求真实电商摄影、竖版 3:4、商品清晰完整；若无可证实的俄语文字内容，不要为了填版面而编造文案。'
+                '必须仅输出 JSON 对象，格式为 {"images":[{"purpose":"简短用途","prompt":"完整单图提示词"}]}，'
+                f'images 数组必须恰好包含 {count} 项，不要 Markdown 代码块或其他文字。'
+            )
+            user_prompt = f'请规划 {count} 张彼此有区别的商品套图提示词：\n{text}'
 
         else:
             system_prompt = '你是专业的电商文案助手。'

@@ -83,6 +83,72 @@ def _migrate_auth_tokens(conn):
     conn.commit()
 
 
+def _migrate_image_billing(conn):
+    """生图计费：accounts 加生图开关与余额，新建扣点流水、充值/开关审计表。
+
+    余额单位是「分」（0.01 点，1 点 = 1 元）：单张图片单价通常不足 1 点，
+    用整数点记账会被抹零。历史已生图不计入余额（用户裁定 2026-10-27），
+    只在列首次创建时写入初始额度。
+    """
+    columns = {row['name'] for row in conn.execute("PRAGMA table_info(accounts)")}
+    first_time = 'image_balance_cents' not in columns
+    if 'image_enabled' not in columns:
+        conn.execute("ALTER TABLE accounts ADD COLUMN image_enabled INTEGER NOT NULL DEFAULT 1")
+    if first_time:
+        conn.execute("ALTER TABLE accounts ADD COLUMN image_balance_cents INTEGER NOT NULL DEFAULT 0")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS image_usage (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id          INTEGER NOT NULL,
+            images              INTEGER NOT NULL DEFAULT 0,
+            cost_points         REAL    NOT NULL DEFAULT 0,
+            cost_cents          INTEGER NOT NULL DEFAULT 0,
+            balance_after_cents INTEGER NOT NULL DEFAULT 0,
+            price_points        REAL    NOT NULL DEFAULT 0,
+            provider            TEXT    NOT NULL DEFAULT '',
+            model               TEXT    NOT NULL DEFAULT '',
+            source              TEXT    NOT NULL DEFAULT '',
+            status              TEXT    NOT NULL DEFAULT 'charged',
+            created_at          TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_usage_account_created "
+        "ON image_usage(account_id, created_at)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_image_usage_created ON image_usage(created_at)")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS image_ops_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id  INTEGER NOT NULL,
+            action      TEXT    NOT NULL,
+            amount_cents INTEGER NOT NULL DEFAULT 0,
+            before_json TEXT    NOT NULL DEFAULT '{}',
+            after_json  TEXT    NOT NULL DEFAULT '{}',
+            operator    TEXT    NOT NULL DEFAULT '',
+            reason      TEXT    NOT NULL DEFAULT '',
+            created_at  TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+        )"""
+    )
+    ops_cols = {row['name'] for row in conn.execute("PRAGMA table_info(image_ops_log)")}
+    if 'amount_cents' not in ops_cols:
+        # 充值流水：正数=加点，负数=扣回/设置余额差额，单位分（0.01 点）
+        conn.execute("ALTER TABLE image_ops_log ADD COLUMN amount_cents INTEGER NOT NULL DEFAULT 0")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_ops_log_account "
+        "ON image_ops_log(account_id, created_at)"
+    )
+    if first_time:
+        # 初始额度（2026-10-27 用户确认）：郭滨扬 40 点、李双 13 点，其余账号 0。
+        for username, cents in (('郭滨扬', 4000), ('李双', 1300)):
+            conn.execute(
+                "UPDATE accounts SET image_balance_cents = ? WHERE username = ?",
+                (cents, username),
+            )
+        print('[migration] 生图计费已启用：郭滨扬 40 点、李双 13 点（单位点，1点=1元）')
+    conn.commit()
+
+
 def _run_migrations(conn):
     """执行增量数据库迁移（幂等：列已存在时跳过）"""
     # 迁移0：accounts 表角色扩展（支持 salesperson 业务员角色）
@@ -92,6 +158,9 @@ def _run_migrations(conn):
 
     # 迁移0.5：auth_tokens 登录令牌表（SQLite 持久化 Token，多 worker 共享）
     _migrate_auth_tokens(conn)
+
+    # 迁移0.6：生图计费（账号余额/生图开关 + 扣点流水 + 充值审计）
+    _migrate_image_billing(conn)
 
     # 迁移1：ozon_attribute_dictionary_values 添加 description_category_id 和 type_id 列
     # 原因：dictionary_id 在 Ozon 中可能被多个类目共享（如"类型"属性），
@@ -143,6 +212,27 @@ def _run_migrations(conn):
     # 原因：update_settings() 用的是 UPDATE ... WHERE id = 1，
     #       行不存在时更新会静默不生效（管理员改了阈值以为保存了，其实没落库）。
     conn.execute("INSERT OR IGNORE INTO ad_monitor_settings (id) VALUES (1)")
+
+    # 迁移3.2：广告写操作审计表（建议 3：改预算/出价必须留痕）
+    # 写操作会花真钱，出问题要能回答「谁、什么时候、把多少改成多少、Ozon 回了什么」。
+    conn.execute("""CREATE TABLE IF NOT EXISTS ad_ops_log (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        store_pk      INTEGER NOT NULL,
+        store_id      TEXT    NOT NULL DEFAULT '',
+        campaign_id   TEXT    NOT NULL DEFAULT '',
+        action        TEXT    NOT NULL,
+        before_json   TEXT    NOT NULL DEFAULT '{}',
+        after_json    TEXT    NOT NULL DEFAULT '{}',
+        status        TEXT    NOT NULL DEFAULT 'ok',
+        message       TEXT    NOT NULL DEFAULT '',
+        operator_id   INTEGER,
+        operator_name TEXT    NOT NULL DEFAULT '',
+        created_at    TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
+    )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ad_ops_log_store "
+        "ON ad_ops_log(store_pk, created_at)"
+    )
 
     online_cols = {
         row['name'] for row in conn.execute("PRAGMA table_info(online_products)")
@@ -322,20 +412,6 @@ def _run_migrations(conn):
         )"""
     )
     conn.execute(
-        """CREATE TABLE IF NOT EXISTS pixpix_oauth_accounts (
-            account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
-            token_json TEXT NOT NULL DEFAULT '{}',
-            client_json TEXT NOT NULL DEFAULT '{}',
-            oauth_state TEXT,
-            pkce_verifier TEXT,
-            redirect_uri TEXT,
-            state_created_at TEXT,
-            tools_json TEXT NOT NULL DEFAULT '[]',
-            expires_at TEXT,
-            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-        )"""
-    )
-    conn.execute(
         """CREATE TABLE IF NOT EXISTS public_notification_reads (
             notification_id INTEGER NOT NULL REFERENCES public_notifications(id) ON DELETE CASCADE,
             user_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -359,22 +435,6 @@ def _run_migrations(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_gallery_assets_user_created ON gallery_assets(user_id, created_at)")
     conn.commit()
 
-    # 迁移10：PixPix OAuth/MCP 服务端连接状态（单例 id=1）
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS pixpix_oauth (
-            id INTEGER PRIMARY KEY CHECK(id = 1),
-            token_json TEXT NOT NULL DEFAULT '{}',
-            client_json TEXT NOT NULL DEFAULT '{}',
-            oauth_state TEXT,
-            pkce_verifier TEXT,
-            redirect_uri TEXT,
-            state_created_at TEXT,
-            tools_json TEXT NOT NULL DEFAULT '[]',
-            expires_at TEXT,
-            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-        )"""
-    )
-    conn.commit()
 
 
 def query(sql, params=(), one=False):

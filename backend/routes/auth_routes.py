@@ -14,6 +14,7 @@
 """
 from flask import Blueprint, request
 from models.account import Account
+from services import image_billing_service as image_billing
 from utils.auth import (
     create_token, destroy_token, get_current_user, require_admin,
 )
@@ -25,6 +26,25 @@ auth_bp = Blueprint('auth', __name__)
 _VALID_ROLES = ('admin', 'operator', 'salesperson')
 _CREATABLE_ROLES = ('salesperson',)
 _ASSIGNABLE_STORE_OWNER_ROLES = ('salesperson',)
+
+
+def _image_billing_fields(account):
+    """账号生图计费字段（用户信息 / 账号列表共用）。
+
+    imageBalance 单位是「点」（1 点 = 1 元），保留 2 位小数；
+    imageBalanceCents 是库里真实存储的整数（分）。
+    """
+    cents = int(account.get('image_balance_cents') or 0)
+    raw_enabled = account.get('image_enabled')
+    enabled = True if raw_enabled is None else bool(int(raw_enabled))
+    return {
+        'imageBalance': image_billing.cents_to_points(cents),
+        'imageBalanceCents': cents,
+        'imageEnabled': enabled,
+        'imageAdminExempt': account.get('role') == 'admin',
+        'imagePricePoints': image_billing.get_billing_config()['price_points_per_image'],
+    }
+
 
 
 @auth_bp.route('/auth/login', methods=['POST'])
@@ -86,6 +106,7 @@ def get_user_info():
             "username": account['username'],
             "nickname": account.get('nickname', ''),
             "role": account.get('role', 'operator'),
+            **_image_billing_fields(account),
         },
         "isLoggedIn": True,
     })
@@ -114,6 +135,7 @@ def list_users():
             "lastLoginAt": a.get('last_login_at', ''),
             "createdAt": a.get('created_at', ''),
             "storeCount": counts.get(a['id'], 0),
+            **_image_billing_fields(a),
         })
     return success_response(data={"list": users, "total": len(users)})
 

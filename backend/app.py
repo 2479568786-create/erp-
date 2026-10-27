@@ -7,6 +7,7 @@ import os
 import json
 import threading
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 from flask import Flask, send_from_directory, send_file, Response, request as flask_request_obj
@@ -14,9 +15,15 @@ from flask_cors import CORS
 from config import Config
 from db import init_db
 from routes import register_blueprints
+from services.image_billing_guard import register_image_billing_guard
 from utils.response import error_response
 from utils.auth import require_api_auth
-from utils.image_proxy import is_public_ozon_image_url
+from utils.image_proxy import (
+    ManagedImageRedirectHandler,
+    is_public_image_url,
+    is_public_managed_image_url,
+    is_public_ozon_image_url,
+)
 
 # 前端目录（相对于 backend/ 的上级目录）
 FRONTEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'frontend'))
@@ -37,6 +44,9 @@ def create_app(config_class=Config):
     # 初始化数据库
     init_db()
 
+    # 将服务重启前遗留的采集任务明确标记为失败，避免界面永久轮询。
+
+
     # 启用跨域支持（来源通过 CORS_ALLOWED_ORIGINS 收敛，默认仅允许本地与扩展）
     _cors_origins = config_class.CORS_ALLOWED_ORIGINS
     CORS(app, resources={
@@ -52,6 +62,9 @@ def create_app(config_class=Config):
 
     # 注册蓝图路由
     register_blueprints(app)
+
+    # 生图计费守卫：闸门（余额/开关）与扣点，与具体路由实现解耦
+    register_image_billing_guard(app)
 
     # 启动时检查并触发 Ozon 类目映射库后台同步（30 天 TTL，超时自动同步）
     try:
@@ -189,22 +202,28 @@ def create_app(config_class=Config):
         target_url = flask_request_obj.args.get('url', '')
         if not target_url:
             return error_response("缺少 url 参数", 400)
-
-        # 仅允许 http/https 协议
         if not target_url.startswith(('http://', 'https://')):
             return error_response("仅支持 http/https URL", 400)
-        if not is_public_ozon_image_url(target_url) and not get_current_user():
+        if not is_public_image_url(target_url) and not get_current_user():
             return error_response("请先登录", 401)
 
         try:
             req = urllib.request.Request(target_url)
-            # 模拟浏览器请求头，绕过防盗链
             req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-            req.add_header('Referer', 'https://www.ozon.ru/' if is_public_ozon_image_url(target_url) else 'https://detail.1688.com/')
+            if is_public_ozon_image_url(target_url):
+                req.add_header('Referer', 'https://www.ozon.ru/')
+            elif not is_public_managed_image_url(target_url):
+                req.add_header('Referer', 'https://detail.1688.com/')
             req.add_header('Accept', 'image/webp,image/apng,image/*,*/*;q=0.8')
 
-            open_image = (urllib.request.build_opener(OzonImageRedirectHandler).open
-                          if is_public_ozon_image_url(target_url) else urllib.request.urlopen)
+            if is_public_ozon_image_url(target_url):
+                open_image = urllib.request.build_opener(OzonImageRedirectHandler).open
+            elif is_public_managed_image_url(target_url):
+                allowed_host = urllib.parse.urlsplit(target_url).hostname
+                handler = ManagedImageRedirectHandler(allowed_host)
+                open_image = urllib.request.build_opener(handler).open
+            else:
+                open_image = urllib.request.urlopen
             with open_image(req, timeout=10) as resp:
                 content_type = resp.headers.get('Content-Type', 'image/jpeg')
                 data = resp.read()
@@ -440,25 +459,6 @@ def create_app(config_class=Config):
             elif not result['success'] and (img_url.startswith('/uploads/') or '/uploads/' in img_url):
                 result['url'] = img_url if img_url.startswith('http') else f'{base_url}{img_url}'
                 result['success'] = True
-
-            # 图库图片：/api/gallery/files/<filename> → 读取图库文件转存到 uploads
-            elif not result['success'] and '/api/gallery/files/' in img_url:
-                try:
-                    from config import DATA_DIR
-                    _gfname = os.path.basename(img_url.split('/api/gallery/files/')[-1])
-                    _gpath = os.path.join(DATA_DIR, 'gallery', _gfname)
-                    if os.path.isfile(_gpath):
-                        with open(_gpath, 'rb') as _gf:
-                            image_data = _gf.read()
-                        _ext = os.path.splitext(_gfname)[1].lstrip('.').lower() or 'png'
-                        if _ext not in ('jpg', 'jpeg', 'png', 'webp', 'gif'):
-                            _ext = 'png'
-                        result['url'] = _save_image_data(image_data, _ext)
-                        result['success'] = True
-                    else:
-                        result['error'] = '图库文件不存在'
-                except Exception as e:
-                    result['error'] = f'图库转存失败: {str(e)}'
 
             results.append(result)
 

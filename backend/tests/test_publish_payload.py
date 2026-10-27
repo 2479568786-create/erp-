@@ -41,6 +41,19 @@ def _product(skus):
 
 
 class PublishPayloadTests(unittest.TestCase):
+    def test_product_weight_falls_back_to_sku_or_legacy_weight_value(self):
+        product = _product([{
+            'skuCode': 'SKU-WEIGHT', 'price': 100, 'stock': 1, 'weight': 235,
+        }])
+        product['weight'] = 0
+        item = build_ozon_product_items(product, publish_mode='merge')[0]
+        self.assertEqual(235, item['weight'])
+
+        product['skus'] = []
+        product['weightValue'] = 410
+        item = build_ozon_product_items(product, publish_mode='merge')[0]
+        self.assertEqual(410, item['weight'])
+
     def test_video_cover_and_description_videos_are_assembled_for_every_sku_item(self):
         product = _product([
             {'skuCode': 'VIDEO-1', 'price': 100},

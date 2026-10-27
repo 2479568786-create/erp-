@@ -96,14 +96,14 @@ def _extract_json(raw: str) -> dict:
         raise
 
 
-def _chat_json(prompt: str, temperature: float = 0.3, attempts: int = 2) -> tuple[dict, str, str]:
+def _chat_json(prompt: str, temperature: float = 0.3, attempts: int = 2, provider_key=None) -> tuple[dict, str, str]:
     """调用已配置文本模型并要求 JSON 输出；解析失败自动重试。
 
     返回 (解析后的 dict, provider, model)。未配置 AI 时报错。
     """
     from services.ai_config_service import get_ai_config
 
-    config = get_ai_config()
+    config = get_ai_config(provider_key)
     api_key = config.get('api_key', '')
     base_url = (config.get('base_url', '') or '').rstrip('/')
     model = config.get('model', '')
@@ -187,7 +187,7 @@ def _product_context(product: dict) -> dict:
 # 第1步：核心卖点整理
 # ============================================================
 
-def summarize_selling_points(raw_lines) -> dict:
+def summarize_selling_points(raw_lines, provider_key=None) -> dict:
     """第1步：人工填中文卖点 -> AI 总结规范化 + 翻译俄语。
 
     返回 {selling_points_zh: [...], selling_points_ru: [...], summary: str, fallback: bool}
@@ -207,7 +207,7 @@ def summarize_selling_points(raw_lines) -> dict:
         "\"selling_points_ru\": [\"俄语卖点\", ...], \"summary\": \"一句话总结（中文）\"}"
     )
     try:
-        result, _, _ = _chat_json(prompt)
+        result, _, _ = _chat_json(prompt, provider_key=provider_key)
         zh = [str(item).strip() for item in result.get('selling_points_zh', []) if str(item).strip()]
         ru = [str(item).strip() for item in result.get('selling_points_ru', []) if str(item).strip()]
         if not zh:
@@ -231,7 +231,7 @@ def summarize_selling_points(raw_lines) -> dict:
 # 第2步：SEO 关键词
 # ============================================================
 
-def generate_seo_keywords(ctx: dict, selling_points_zh: list[str], selling_points_ru: list[str]) -> dict:
+def generate_seo_keywords(ctx: dict, selling_points_zh: list[str], selling_points_ru: list[str], provider_key=None, source_facts=None) -> dict:
     """第2步：基于核心卖点生成 30 个俄语 SEO 关键词，分 3 组。
 
     返回 {keywords_ru: [...30], main_tags_ru: [...8-10], long_tail_tags_ru: [...10-12],
@@ -239,7 +239,30 @@ def generate_seo_keywords(ctx: dict, selling_points_zh: list[str], selling_point
     """
     zh_block = '；'.join(selling_points_zh) or '（未填写）'
     ru_block = '；'.join(selling_points_ru) or '（未填写）'
-    prompt = (
+    if provider_key == 'shangdekuai_lingke':
+        fact_block = '\n'.join(str(item) for item in (source_facts or []) if str(item).strip()) or '（无额外事实）'
+        prompt = (
+            "你是俄罗斯 Ozon 商品卡 SEO 助手。只根据已审核商品事实和卖点生成搜索词与主题标签候选。\n"
+            f"商品：{ctx.get('title_zh') or ctx.get('source_title')}\n"
+            f"Ozon 类目：{ctx.get('ozon_category_name') or '待确认'}\n"
+            f"已审核原始事实：\n{fact_block}\n"
+            f"中文卖点：{zh_block}\n俄语卖点：{ru_block}\n"
+            "规则：\n"
+            "- keywords_ru 生成 20-30 个真实相关的俄语搜索词候选，供人工参考；它们不是要直接发布的主题标签。"
+            "去重，不含竞品品牌、无关热词或未确认属性。keywords_zh 与其逐项对应。\n"
+            "- main_tags_ru 生成 7-9 个宽泛流量标签，表达商品所属大类、常用宽泛搜索表达或核心需求；"
+            "不要照抄商品卡已有的品牌、商品类型等属性，可用相关但不重复的类别表达。\n"
+            "- long_tail_tags_ru 生成 8-10 个精准长尾标签，围绕已确认的使用场景、用途、买点和商品特征组合；"
+            "每个组合必须有事实依据，不得推断功能或适配范围。\n"
+            "- 每个标签以 # 开头，标签内部只用俄文字母、英文字母、数字和下划线，不含空格，最多 30 个字符；"
+            "两个标签组之间去重，每个商品标签总量不得超过 30 个。\n"
+            "- 仅在事实足够支持时输出标签；不要为凑数量编造或重复。辅助场景标签组不再单独生成，返回空数组。\n"
+            "- 中文标签翻译分别填入 main_tags_zh 和 long_tail_tags_zh。\n"
+            "输出严格 JSON：{\"keywords_ru\": [], \"keywords_zh\": [], \"main_tags_ru\": [], \"main_tags_zh\": [], "
+            "\"long_tail_tags_ru\": [], \"long_tail_tags_zh\": [], \"auxiliary_tags_ru\": [], \"auxiliary_tags_zh\": []}"
+        )
+    else:
+        prompt = (
         "你是俄罗斯 Ozon 市场的 SEO 关键词专家。基于商品的核心卖点生成 SEO 关键词。\n"
         f"商品：{ctx.get('title_zh') or ctx.get('source_title')}\n"
         f"核心卖点（中文）：{zh_block}\n"
@@ -255,9 +278,9 @@ def generate_seo_keywords(ctx: dict, selling_points_zh: list[str], selling_point
         "\"main_tags_ru\": [...], \"main_tags_zh\": [...], "
         "\"long_tail_tags_ru\": [...], \"long_tail_tags_zh\": [...], "
         "\"auxiliary_tags_ru\": [...], \"auxiliary_tags_zh\": [...]}"
-    )
+        )
     try:
-        result, _, _ = _chat_json(prompt)
+        result, _, _ = _chat_json(prompt, provider_key=provider_key)
     except CardServiceError as exc:
         raise CardServiceError(f'SEO 关键词生成失败：{exc}') from exc
 
@@ -270,12 +293,12 @@ def generate_seo_keywords(ctx: dict, selling_points_zh: list[str], selling_point
     return {
         'keywords_ru': keywords_ru,
         'keywords_zh': (lst('keywords_zh') + [''] * 30)[: len(keywords_ru)],
-        'main_tags_ru': lst('main_tags_ru')[:10],
-        'main_tags_zh': lst('main_tags_zh')[:10],
-        'long_tail_tags_ru': lst('long_tail_tags_ru')[:12],
-        'long_tail_tags_zh': lst('long_tail_tags_zh')[:12],
-        'auxiliary_tags_ru': lst('auxiliary_tags_ru')[:3],
-        'auxiliary_tags_zh': lst('auxiliary_tags_zh')[:3],
+        'main_tags_ru': lst('main_tags_ru')[:9 if provider_key == 'shangdekuai_lingke' else 10],
+        'main_tags_zh': lst('main_tags_zh')[:9 if provider_key == 'shangdekuai_lingke' else 10],
+        'long_tail_tags_ru': lst('long_tail_tags_ru')[:10 if provider_key == 'shangdekuai_lingke' else 12],
+        'long_tail_tags_zh': lst('long_tail_tags_zh')[:10 if provider_key == 'shangdekuai_lingke' else 12],
+        'auxiliary_tags_ru': [] if provider_key == 'shangdekuai_lingke' else lst('auxiliary_tags_ru')[:3],
+        'auxiliary_tags_zh': [] if provider_key == 'shangdekuai_lingke' else lst('auxiliary_tags_zh')[:3],
     }
 
 
@@ -283,7 +306,7 @@ def generate_seo_keywords(ctx: dict, selling_points_zh: list[str], selling_point
 # 第3步：商品卡生成
 # ============================================================
 
-def _norm_tags(tags: list[str]) -> list[str]:
+def _norm_tags(tags: list[str], max_len=MAX_TAG_LEN) -> list[str]:
     """Ozon 主题标签规范化：# 开头，无空格（下划线替换），≤28 字符（旧 ERP norm_tags 原样迁移）。"""
     out = []
     for tag in tags:
@@ -292,11 +315,10 @@ def _norm_tags(tags: list[str]) -> list[str]:
         cleaned = re.sub(r'[^A-Za-zА-Яа-яЁё0-9_]', '', cleaned)
         if not cleaned:
             continue
-        if len(cleaned) > MAX_TAG_LEN - 1:
-            cleaned = cleaned[:MAX_TAG_LEN - 1]
+        if len(cleaned) > max_len - 1:
+            cleaned = cleaned[:max_len - 1]
         out.append('#' + cleaned)
     return out
-
 
 def _word_count(text: str) -> int:
     return len(re.findall(r'[A-Za-zА-Яа-яЁё0-9]+', text or ''))
@@ -345,10 +367,10 @@ def _remove_detected_brands(result: dict, brands: list[str]) -> None:
             ]
 
 
-def generate_product_card(ctx: dict, selling_points_zh: list[str], selling_points_ru: list[str], seo: dict) -> dict:
+def generate_product_card(ctx: dict, selling_points_zh: list[str], selling_points_ru: list[str], seo: dict, provider_key=None, source_facts=None) -> dict:
     """第3步：用核心卖点 + SEO 关键词生成商品卡（标题/描述/主题标签）。
 
-    按 Ozon 现行平台规则：title_ru ≤130 字符（旧 ERP ≤100，涂总已确认按现行规则）。
+    上得快商品卡遵循 ERP 内部 title_ru ≤130 字符校验；原 ERP 商品卡分支不变。
     """
     zh_block = '；'.join(selling_points_zh) or '（未填写）'
     ru_block = '；'.join(selling_points_ru) or '（未填写）'
@@ -359,7 +381,37 @@ def generate_product_card(ctx: dict, selling_points_zh: list[str], selling_point
     category_label, title_structure = category_title_guidance(
         ctx.get('ozon_category_name'), ctx.get('title_zh') or ctx.get('source_title')
     )
-    prompt = (
+    if provider_key == 'shangdekuai_lingke':
+        fact_block = '\n'.join(str(item) for item in (source_facts or []) if str(item).strip()) or '（无额外事实）'
+        prompt = (
+            "你是俄罗斯 Ozon 商品卡文案专家。根据已审核事实生成可由人工复核的俄语商品卡。\n"
+            f"商品：{ctx.get('title_zh') or ctx.get('source_title')}\n"
+            f"Ozon 类目：{ctx.get('ozon_category_name') or '待确认'}\n"
+            f"已审核原始事实：\n{fact_block}\n"
+            f"中文卖点：{zh_block}\n俄语卖点：{ru_block}\n"
+            f"搜索词候选（仅供自然参考，不要复制成词表）：{kw_block}\n"
+            f"主标签候选：{main_tags}\n精准长尾标签候选：{long_tail}\n"
+            f"类目画像：{category_label}；建议标题结构：{title_structure}\n"
+            "要求：\n"
+            f"- title_ru 使用俄语，≤{MAX_TITLE_RU_LEN} 字符（ERP 内部上限），先写清商品类型，再加入最重要且已确认的型号/参数/特点；"
+            "简洁、可读，不堆砌关键词。品牌仅在事实明确且可合法使用时保留。不得含价格、折扣、促销、库存、重量、店铺信息或极限词。\n"
+            "- title_zh 是准确的中文对应标题，不增加俄语标题中没有的事实。\n"
+            "- description_ru 按 ERP 全局文案要求控制在约 200-300 词，并且不得超过 Ozon 6000 字符上限；"
+            "写成与本商品相关的连贯事实描述，介绍用途、已确认参数/材质、实际使用场景、适配范围或包装信息（仅限已确认）。"
+            "不要把关键词罗列成清单，不写没有证据的评价、性能承诺或使用效果。\n"
+            "- description_zh 与俄语描述含义一致。俄语字段不得混入中文。可用自然段或列表，不生成复杂 HTML。\n"
+            "- keywords_ru / keywords_zh 复用搜索词候选；main_tags_ru / long_tail_tags_ru 复用对应候选标签，不新增、不重复；"
+            "辅助标签组返回空数组。\n"
+            "- pending_confirmations_zh 列出影响商品理解但尚未确认的信息；blocked_claims_zh 列出已排除的品牌/违规或无依据声明，没有则空数组。\n"
+            "- 价格和包装/物流重量由人工填写，不写入任何文案字段。不得写原装/正品/仿品/复制品等无法证明的身份声明，"
+            "也不得写价格、折扣、赠品促销、库存、联系方式、外链、配送/退货说明或购买号召。\n"
+            "输出严格 JSON：{\"title_ru\": \"\", \"title_zh\": \"\", \"description_ru\": \"\", \"description_zh\": \"\", "
+            "\"keywords_ru\": [], \"keywords_zh\": [], \"main_tags_ru\": [], \"main_tags_zh\": [], "
+            "\"long_tail_tags_ru\": [], \"long_tail_tags_zh\": [], \"auxiliary_tags_ru\": [], "
+            "\"auxiliary_tags_zh\": [], \"pending_confirmations_zh\": [], \"blocked_claims_zh\": []}"
+        )
+    else:
+        prompt = (
         "你是俄罗斯 Ozon 市场的资深商品卡文案专家。基于核心卖点与 SEO 关键词生成完整商品卡。\n"
         f"商品：{ctx.get('title_zh') or ctx.get('source_title')}\n"
         f"类目：{ctx.get('ozon_category_name') or '待确认'}\n"
@@ -383,9 +435,9 @@ def generate_product_card(ctx: dict, selling_points_zh: list[str], selling_point
         "\"keywords_ru\": [], \"keywords_zh\": [], \"main_tags_ru\": [], \"main_tags_zh\": [], "
         "\"long_tail_tags_ru\": [], \"long_tail_tags_zh\": [], \"auxiliary_tags_ru\": [], "
         "\"auxiliary_tags_zh\": [], \"pending_confirmations_zh\": [], \"blocked_claims_zh\": []}"
-    )
+        )
     try:
-        result, provider, model = _chat_json(prompt, temperature=0.4)
+        result, provider, model = _chat_json(prompt, temperature=0.4, provider_key=provider_key)
     except CardServiceError as exc:
         raise CardServiceError(f'商品卡生成失败：{exc}') from exc
 
@@ -394,6 +446,9 @@ def generate_product_card(ctx: dict, selling_points_zh: list[str], selling_point
 
     keywords_ru = lst('keywords_ru') or (seo.get('keywords_ru') or [])
     description_ru = str(result.get('description_ru', '')).strip()
+    is_shangdekuai = provider_key == 'shangdekuai_lingke'
+    if is_shangdekuai and len(description_ru) > 6000:
+        raise CardServiceError('商品卡生成失败：俄语简介超过 Ozon 的 6000 字符上限，请重新生成')
     word_count = _word_count(description_ru)
     if word_count < 150:
         raise CardServiceError(f'模型返回的俄文描述仅 {word_count} 词，未达到 150 词质量要求，请重试')
@@ -405,11 +460,11 @@ def generate_product_card(ctx: dict, selling_points_zh: list[str], selling_point
         'description_zh': str(result.get('description_zh', '')),
         'keywords_ru': keywords_ru,
         'keywords_zh': lst('keywords_zh') or (seo.get('keywords_zh') or []),
-        'main_tags_ru': _norm_tags(lst('main_tags_ru') or (seo.get('main_tags_ru') or [])),
+        'main_tags_ru': _norm_tags(lst('main_tags_ru') or (seo.get('main_tags_ru') or []), max_len=30 if is_shangdekuai else MAX_TAG_LEN),
         'main_tags_zh': lst('main_tags_zh') or (seo.get('main_tags_zh') or []),
-        'long_tail_tags_ru': _norm_tags(lst('long_tail_tags_ru') or (seo.get('long_tail_tags_ru') or [])),
+        'long_tail_tags_ru': _norm_tags(lst('long_tail_tags_ru') or (seo.get('long_tail_tags_ru') or []), max_len=30 if is_shangdekuai else MAX_TAG_LEN),
         'long_tail_tags_zh': lst('long_tail_tags_zh') or (seo.get('long_tail_tags_zh') or []),
-        'auxiliary_tags_ru': _norm_tags(lst('auxiliary_tags_ru') or (seo.get('auxiliary_tags_ru') or [])),
+        'auxiliary_tags_ru': [] if is_shangdekuai else _norm_tags(lst('auxiliary_tags_ru') or (seo.get('auxiliary_tags_ru') or [])),
         'auxiliary_tags_zh': lst('auxiliary_tags_zh') or (seo.get('auxiliary_tags_zh') or []),
         'tags_ru': [],
         'tags_zh': [],
@@ -708,3 +763,24 @@ def generate_card(product_id: str, raw_selling_points=None, base_card_id: int | 
         product_id, data, provider=provider, model=model, previous_id=base_card_id
     )
     return saved
+
+
+def generate_card_content(ctx: dict, raw_selling_points) -> dict:
+    """按现有商品卡 AI 三步框架生成内容，但不读取 Product 或写入 product_cards。"""
+    provider_key = 'shangdekuai_lingke'
+    step1 = summarize_selling_points(raw_selling_points, provider_key=provider_key)
+    validate_russian_card_fields({'selling_points_ru': step1.get('selling_points_ru') or []})
+    step2 = generate_seo_keywords(ctx, step1['selling_points_zh'], step1.get('selling_points_ru') or [],
+                                  provider_key=provider_key, source_facts=raw_selling_points)
+    step3 = generate_product_card(ctx, step1['selling_points_zh'], step1.get('selling_points_ru') or [],
+                                  step2, provider_key=provider_key, source_facts=raw_selling_points)
+    data = {
+        'selling_points_zh': step1['selling_points_zh'],
+        'selling_points_ru': step1.get('selling_points_ru') or [],
+        'summary_zh': step1.get('summary') or '',
+        **step2,
+        **step3,
+    }
+    data['provider'] = data.pop('_provider', '') or ''
+    data['model'] = data.pop('_model', '') or ''
+    return data

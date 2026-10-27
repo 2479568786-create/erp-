@@ -10,8 +10,8 @@ from models.order import Order
 from models.account import Store
 from models.product import PublishRecord
 from services.ozon_api import (
-    _get_store_credentials, get_finance_accruals_by_day,
-    get_finance_accrual_types,
+    _get_store_credentials, list_finance_accruals_by_day,
+    list_finance_accrual_types,
 )
 
 # 已付款订单状态（营业额口径，与 AI 询盘助手保持一致）
@@ -122,7 +122,7 @@ def sync_store_transactions(store_id, date_from=None, date_to=None, initial_days
     saved = 0
     total = 0
     try:
-        types = get_finance_accrual_types(client_id, api_key).get('accrual_types') or []
+        types = list_finance_accrual_types(client_id, api_key).get('accrual_types') or []
         type_names = {str(t.get('id')): t.get('name', '') for t in types}
         cur = datetime.strptime(date_from, '%Y-%m-%d')
         end = datetime.strptime(date_to, '%Y-%m-%d')
@@ -130,7 +130,7 @@ def sync_store_transactions(store_id, date_from=None, date_to=None, initial_days
             day = cur.strftime('%Y-%m-%d')
             last_id = ''
             for _ in range(200):
-                resp = get_finance_accruals_by_day(day, client_id, api_key, last_id)
+                resp = list_finance_accruals_by_day(day, last_id, client_id, api_key)
                 accruals = (resp or {}).get('accruals') or []
                 if not accruals:
                     break

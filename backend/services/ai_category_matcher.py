@@ -133,28 +133,52 @@ def _filter_candidates_by_keywords(categories, source_category, title, descripti
     # 合并所有信号文本用于提取关键词
     all_text = ' '.join(filter(None, [source_category or '', title or '', description or '']))
     if not all_text.strip():
-        # 无任何信号，返回前 top_n 个（保持原序）
-        return categories[:top_n]
+        # 无任何信号，返回空（无信号时不注入无关兜底，AI 侧会明确报"信息不足"）
+        return []
 
-    # 提取关键词（按非字母数字汉字分隔，小写）
-    # 保留长度 >= 2 的词（俄文/中文/英文）
-    raw_words = re.split(r'[>/、|，,\s\-_;:.!?\(\)（）【】\[\]]+', all_text.lower())
+    # 提取关键词：先把「3d打印petg耗材」这类中英文粘连词拆成独立 token，
+    # 再做基础停用词过滤。中文还可额外生成 2-gram 子串提高召回。
+    lowered = all_text.lower()
+    raw_words = re.split(r'[>/、|，,\s\-_;:.!?\(\)（）【】\[\]]+', lowered)
+    stopwords = {
+        'the', 'and', 'for', 'with', 'это', 'или', 'для', 'как', 'но', 'при', 'что',
+        '商品', '描述', '采集', '分类', '标题', '规格', '型号', '高速', '便携', '新款',
+    }
     keywords = []
     seen = set()
     for w in raw_words:
         w = w.strip()
-        if len(w) >= 2 and w not in seen:
-            # 排除常见停用词
-            if w in ('the', 'and', 'for', 'with', 'это', 'или', 'для', 'как', 'но', 'при', 'что',
-                     '商品', '描述', '采集', '分类', '标题', '规格', '型号'):
+        if not w:
+            continue
+        # 中英文/数字粘连 → 拆成字母数字段 + 汉字段
+        pieces = re.findall(r'[a-zа-яё0-9]+|[\u4e00-\u9fff]+', w)
+        for piece in pieces:
+            piece = piece.strip()
+            if not piece:
                 continue
-            seen.add(w)
-            keywords.append(w)
+            # 字母数字 token 太短（1 字符）无区分度，跳过；但保留 2 字符以上
+            if len(piece) < 2 and not re.search(r'[\u4e00-\u9fff]', piece):
+                continue
+            if piece in stopwords:
+                continue
+            if piece not in seen:
+                seen.add(piece)
+                keywords.append(piece)
+    # 中文 token 补充 2-gram 子串，提高「打印耗材」对「打印」「耗材」的召回
+    extra = []
+    for kw in list(keywords):
+        if re.search(r'[\u4e00-\u9fff]', kw) and len(kw) >= 2:
+            for i in range(len(kw) - 1):
+                bigram = kw[i:i + 2]
+                if bigram not in seen and bigram not in stopwords:
+                    seen.add(bigram)
+                    extra.append(bigram)
+    keywords.extend(extra)
 
     if not keywords:
-        return categories[:top_n]
+        return []
 
-    # 对每个类目打分
+    # 对每个类目打分：token 命中 search_text 即加分；L3 命中权重更高
     scored = []
     for cat in categories:
         search_text = cat.get('search_text', '')
@@ -163,7 +187,6 @@ def _filter_candidates_by_keywords(categories, source_category, title, descripti
         score = 0
         for kw in keywords:
             if kw in search_text:
-                # L3 名称（路径最后一段）匹配权重最高
                 l3_zh = path.rsplit('>', 1)[-1].strip()
                 l3_ru = path_ru.rsplit('>', 1)[-1].strip()
                 if kw == l3_zh or kw == l3_ru:
@@ -175,16 +198,31 @@ def _filter_candidates_by_keywords(categories, source_category, title, descripti
         if score > 0:
             scored.append((score, cat))
 
-    if not scored:
-        # 关键词没匹配到任何类目，返回前 top_n 个兜底
-        return categories[:top_n]
+    if scored:
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [cat for _, cat in scored[:top_n]]
 
-    # 按得分降序，取 top_n
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [cat for _, cat in scored[:top_n]]
+    # 兜底：没有任何 token 命中时，不再塞进前 top_n 个无关类目。
+    # 用更粗的「单个汉字」再尝试一次，保留任何微弱相关性；仍无则返回空，
+    # AI 侧据此明确报告「无候选」而不是在无关类目里强行猜。
+    single_chars = []
+    for kw in keywords:
+        for ch in kw:
+            if re.fullmatch(r'[\u4e00-\u9fff]', ch):
+                single_chars.append(ch)
+    if single_chars:
+        char_set = set(single_chars)
+        weakly = []
+        for cat in categories:
+            hits = sum(1 for ch in char_set if ch in cat.get('search_text', ''))
+            if hits > 0:
+                weakly.append((hits, cat))
+        weakly.sort(key=lambda x: x[0], reverse=True)
+        return [cat for _, cat in weakly[:top_n]]
+    return []
 
 
-def ai_match_category(source_category, title='', description='', tree=None):
+def ai_match_category(source_category, title='', description='', tree=None, prioritize_title=False):
     """使用 AI 进行类目语义匹配
 
     Args:
@@ -260,7 +298,24 @@ def ai_match_category(source_category, title='', description='', tree=None):
 
     # 根据是否有 source_category 调整系统提示
     has_category = bool(source_category and source_category.strip())
-    if has_category:
+    if has_category and prioritize_title:
+        system_prompt = """你是一个跨境电商类目匹配专家。你的任务是从Ozon平台类目列表中，按商品本体选择最匹配的类目。
+
+规则：
+1. 以商品标题为主信号，识别实际售卖的商品本体；采集分类可能是 Ozon 页面的大类或不精确分类，只作辅助
+2. 商品描述用于核验商品本体，不得把适用设备误判为商品本身（例如 3D 打印线材不是打印机）
+3. 从提供的Ozon类目列表中选择最匹配的类目；不确定时降低置信度，不得仅因来源类目名称相似而强行匹配
+4. 返回JSON格式，包含以下字段：
+   - matched: 是否匹配成功 (true/false)
+   - description_category_id: Ozon二级类目ID (数字)
+   - type_id: Ozon三级类型ID (数字)
+   - label: 匹配的类目路径
+   - confidence: 置信度 (\"high\"/\"medium\"/\"low\")
+   - reason: 匹配理由 (简短说明)
+   - candidates: 候选类目列表 (最多3个，每个含description_category_id, type_id, label)
+
+只返回JSON，不要其他文字。"""
+    elif has_category:
         system_prompt = """你是一个跨境电商类目匹配专家。你的任务是根据商品的采集分类信息（辅以标题和描述），从Ozon平台的类目列表中选择最匹配的类目。
 
 规则：

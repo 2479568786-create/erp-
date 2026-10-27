@@ -7,9 +7,22 @@ from models.product import PublishRecord, Product
 from services.publish_service import PublishService
 from utils.response import success_response, error_response, paginate_response, handle_errors
 from utils.validators import extract_pagination
-from utils.auth import get_current_user, visible_ozon_store_ids
+from utils.auth import require_login, get_current_user, visible_ozon_store_ids
 
 publish_record_bp = Blueprint('publish_records', __name__)
+
+
+def _record_store_allowed(user, record):
+    """校验该上架记录所属店铺是否在当前用户权限内；失败返回 error_response。"""
+    if not user:
+        return error_response("请先登录", 401)
+    if user.get('role') == 'admin':
+        return None
+    store_id = str(record.get('storeId') or record.get('store_id') or '').strip()
+    allowed = visible_ozon_store_ids(user) or []
+    if store_id and store_id in allowed:
+        return None
+    return error_response("只能操作自己有权限店铺的上架记录", 403)
 
 
 @publish_record_bp.route('/publish-records', methods=['GET'])
@@ -178,11 +191,17 @@ def delete_publish_record(record_id):
 
 @publish_record_bp.route('/publish-records/<record_id>/submit', methods=['POST'])
 @handle_errors
+@require_login
 def submit_publish_record(record_id):
     """提交上架记录到 Ozon 平台"""
     record = PublishRecord.find_by_id(record_id)
     if not record:
         return error_response("记录不存在", 404)
+
+    user = get_current_user()
+    auth_error = _record_store_allowed(user, record)
+    if auth_error is not None:
+        return auth_error
 
     product_id = record.get('productId')
     if not product_id:
@@ -210,11 +229,17 @@ def submit_publish_record(record_id):
 
 @publish_record_bp.route('/publish-records/<record_id>/refresh', methods=['POST'])
 @handle_errors
+@require_login
 def refresh_publish_record(record_id):
     """刷新上架记录状态（从 Ozon 查询最新状态）"""
     record = PublishRecord.find_by_id(record_id)
     if not record:
         return error_response("记录不存在", 404)
+
+    user = get_current_user()
+    auth_error = _record_store_allowed(user, record)
+    if auth_error is not None:
+        return auth_error
 
     ozon_task_id = record.get('ozonTaskId')
     if not ozon_task_id:

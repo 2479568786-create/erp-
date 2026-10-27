@@ -67,6 +67,29 @@ class YandexGptAdapterTests(unittest.TestCase):
         self.assertEqual('Return a short answer', payload['messages'][0]['text'])
         self.assertEqual('hello', payload['messages'][1]['text'])
 
+    def test_russian_prompt_requires_russian_only_output(self):
+        from services.ai_service import AIService
+
+        system_prompt, _ = AIService._build_prompt(
+            'description', '黑色耳机耳垫', {'language': 'ru', 'platform': 'ozon'}
+        )
+
+        self.assertIn('仅使用俄语输出', system_prompt)
+        self.assertIn('禁止英文', system_prompt)
+
+    @patch('services.ai_config_service.call_text_model', return_value='ok\n\nextra')
+    def test_connection_test_requests_exact_ok_response(self, call_text_model):
+        result = ai_config_service.test_provider_connection(
+            'yandexgpt', api_key='test-key',
+            base_url='https://ai.api.cloud.yandex.net/foundationModels/v1',
+            model='gpt://b1g4fd2oie4j24c3oehb/yandexgpt-lite',
+        )
+
+        prompt = call_text_model.call_args.args[1][0]['content']
+        self.assertIn('只回复小写字母 ok', prompt)
+        self.assertIn('"ok"', result['message'])
+        self.assertNotIn('extra', result['message'])
+
 
 if __name__ == '__main__':
     unittest.main()

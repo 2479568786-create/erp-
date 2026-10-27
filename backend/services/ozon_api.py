@@ -15,6 +15,7 @@ from data.category_mapping_general import SYNONYM_MAP, GENERAL_MAPPINGS, CATEGOR
 from services.category_mapping_cache import get_mapping, set_mapping, get_all_mappings, delete_mapping, clear_all_mappings, get_cache_stats, add_manual_mapping
 
 OZON_API_BASE = 'https://api-seller.ozon.ru'
+CATEGORY_API_STORE_ALIAS = '好物推荐官'
 
 # 本地缓存目录
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'cache')
@@ -66,145 +67,30 @@ def _get_store_credentials(store_id=None):
     return str(client_id), api_key
 
 
-# ========== 重试策略（P0 稳定性修复） ==========
-# Ozon 接口在高负载时会返回瞬时错误（VALIDATION ERROR / 5xx / 429），
-# 同一次请求立即重试往往就能成功。此前代码单次请求失败即抛异常，
-# 导致"明明能成功却报失败"，并让整批图片提交被放弃。
-OZON_API_RETRIES = int(os.environ.get('OZON_API_RETRIES', '2'))      # 额外重试次数（共 3 次尝试）
-OZON_API_BACKOFF = float(os.environ.get('OZON_API_BACKOFF', '3'))    # 首次重试等待秒数，指数退避
+def _call_category_api(endpoint, body, client_id=None, api_key=None):
+    """Use the designated store for category metadata requests."""
+    if client_id and api_key:
+        return _call_ozon_api(endpoint, body, client_id, api_key)
 
-# 只对这些情况重试：服务端错误 / 限流 / 瞬时校验失败 / 网络抖动
-_RETRYABLE_STATUS = (429, 500, 502, 503, 504, 408)
-_RETRYABLE_HINTS = ('validation error', 'try again', 'timeout', 'too many requests',
-                    'internal error', 'service unavailable', 'temporarily')
+    from models.account import Store
 
+    store = next(
+        (item for item in Store.find_all(auth_status='active')
+         if str(item.get('alias') or '').strip() == CATEGORY_API_STORE_ALIAS),
+        None,
+    )
+    if not store:
+        raise OzonAPIError(f'未找到已启用的类目API店铺：{CATEGORY_API_STORE_ALIAS}', 401)
 
-def _is_retryable(status_code, message):
-    """判断一个失败的 Ozon 响应是否值得重试
+    credentials = _get_store_credentials(store.get('store_id'))
+    if not all(credentials):
+        raise OzonAPIError(f'类目API店铺未配置完整凭证：{CATEGORY_API_STORE_ALIAS}', 401)
 
-    Ozon 对参数/图片校验失败时返回的是 **400 + message='VALIDATION ERROR'**，
-    这既可能是"请求本身不合规"（重试无用），也可能是"服务端瞬时抖动"
-    （重试即过）。线上实测属于后者，因此这里按 message 文案判定为可重试；
-    只有明确的凭证/权限错误（401/403/404）才不重试。
-    """
-    if status_code in (401, 403, 404):
-        return False
-    if status_code in _RETRYABLE_STATUS:
-        return True
-    text = str(message or '').lower()
-    return any(h in text for h in _RETRYABLE_HINTS)
+    return _call_ozon_api(endpoint, body, *credentials)
 
 
-def _post_with_retry(url, body, headers, retries=None, backoff=None, logger=None):
-    """带指数退避重试的 POST，返回 (data, attempts)；全部失败时抛 OzonAPIError。
-
-    仅对瞬时性错误重试（5xx / 429 / VALIDATION ERROR / 网络抖动），
-    对 401/403/404 这类确定性错误立即失败，避免无谓等待。
-    """
-    retries = OZON_API_RETRIES if retries is None else int(retries)
-    backoff = OZON_API_BACKOFF if backoff is None else float(backoff)
-    log = logger or print
-    attempts = 0
-
-    while True:
-        attempts += 1
-        reason = None
-        try:
-            resp = requests.post(url, json=body, headers=headers, timeout=30)
-            try:
-                data = resp.json()
-            except ValueError:
-                data = {'message': resp.text[:500]}
-
-            if resp.status_code == 200:
-                return data, attempts
-
-            message = str(data.get('message') or data.get('error') or resp.text[:500])
-            if attempts <= retries and _is_retryable(resp.status_code, message):
-                wait = backoff * (2 ** (attempts - 1))
-                log(f'[OzonAPI] 瞬时错误 HTTP {resp.status_code}，{wait:.0f}s 后重试 '
-                    f'({attempts}/{retries}): {message[:160]}')
-                time.sleep(wait)
-                continue
-
-            raise OzonAPIError(f'Ozon API 错误: {message}', resp.status_code)
-
-        except OzonAPIError:
-            raise
-        except requests.exceptions.Timeout:
-            reason = 'Ozon API 请求超时'
-        except requests.exceptions.ConnectionError:
-            reason = '无法连接 Ozon API 服务器'
-        except requests.exceptions.RequestException as e:
-            reason = f'请求异常: {str(e)}'
-
-        # 网络类异常同样值得重试
-        if reason and attempts <= retries:
-            wait = backoff * (2 ** (attempts - 1))
-            log(f'[OzonAPI] {reason}，{wait:.0f}s 后重试 ({attempts}/{retries})')
-            time.sleep(wait)
-            continue
-        raise OzonAPIError(reason)
-
-
-def _get_with_retry(url, headers, retries=None, backoff=None, logger=None):
-    """带指数退避重试的 GET，返回 (data, attempts)；全部失败时抛 OzonAPIError。
-
-    与 _post_with_retry 语义完全对称 —— 少数 Ozon 接口（如 /v1/actions）
-    只接受 GET，用 POST 调用会返回 405。重试判定复用 _is_retryable，
-    同样对 5xx / 429 / 408 / 瞬时校验失败重试，对 401/403/404 立即失败。
-    """
-    retries = OZON_API_RETRIES if retries is None else int(retries)
-    backoff = OZON_API_BACKOFF if backoff is None else float(backoff)
-    log = logger or print
-    attempts = 0
-
-    while True:
-        attempts += 1
-        reason = None
-        try:
-            resp = requests.get(url, headers=headers, timeout=30)
-            try:
-                data = resp.json()
-            except ValueError:
-                data = {'message': resp.text[:500]}
-
-            if resp.status_code == 200:
-                return data, attempts
-
-            message = str(data.get('message') or data.get('error') or resp.text[:500])
-            if attempts <= retries and _is_retryable(resp.status_code, message):
-                wait = backoff * (2 ** (attempts - 1))
-                log(f'[OzonAPI] 瞬时错误 HTTP {resp.status_code}，{wait:.0f}s 后重试 '
-                    f'({attempts}/{retries}): {message[:160]}')
-                time.sleep(wait)
-                continue
-
-            raise OzonAPIError(f'Ozon API 错误: {message}', resp.status_code)
-
-        except OzonAPIError:
-            raise
-        except requests.exceptions.Timeout:
-            reason = 'Ozon API 请求超时'
-        except requests.exceptions.ConnectionError:
-            reason = '无法连接 Ozon API 服务器'
-        except requests.exceptions.RequestException as e:
-            reason = f'请求异常: {str(e)}'
-
-        if reason and attempts <= retries:
-            wait = backoff * (2 ** (attempts - 1))
-            log(f'[OzonAPI] {reason}，{wait:.0f}s 后重试 ({attempts}/{retries})')
-            time.sleep(wait)
-            continue
-        raise OzonAPIError(reason)
-
-
-def _call_ozon_api_get(endpoint, client_id=None, api_key=None,
-                       retries=None, logger=None):
-    """调用只支持 GET 的 Ozon Seller API（带瞬时错误重试）
-
-    专供 /v1/actions 这类"仅 GET"接口使用；POST 会返回 405。
-    """
+def _call_ozon_api(endpoint, body, client_id=None, api_key=None):
+    """调用 Ozon Seller API"""
     if not client_id or not api_key:
         client_id, api_key = _get_store_credentials()
 
@@ -218,32 +104,29 @@ def _call_ozon_api_get(endpoint, client_id=None, api_key=None,
     }
 
     url = f'{OZON_API_BASE}{endpoint}'
-    data, _attempts = _get_with_retry(url, headers, retries=retries, logger=logger)
-    return data
+    try:
+        resp = requests.post(url, json=body, headers=headers, timeout=30)
+        try:
+            data = resp.json()
+        except ValueError:
+            raise OzonAPIError(
+                f'Ozon API 返回非 JSON 响应 (HTTP {resp.status_code}): {resp.text[:200]}',
+                resp.status_code
+            )
 
+        if resp.status_code != 200:
+            raise OzonAPIError(
+                f'Ozon API 错误: {data.get("message", resp.text)}',
+                resp.status_code
+            )
 
-def _call_ozon_api(endpoint, body, client_id=None, api_key=None,
-                   retries=None, logger=None):
-    """调用 Ozon Seller API（带瞬时错误重试）
-
-    默认重试次数由 OZON_API_RETRIES 控制（默认 2 次额外重试）。
-    可通过 retries=0 关闭重试，用于"必须只调一次"的场景。
-    """
-    if not client_id or not api_key:
-        client_id, api_key = _get_store_credentials()
-
-    if not client_id or not api_key:
-        raise OzonAPIError('未配置 Ozon API 凭证，请先在店铺管理中添加 API Key', 401)
-
-    headers = {
-        'Client-Id': client_id,
-        'Api-Key': api_key,
-        'Content-Type': 'application/json',
-    }
-
-    url = f'{OZON_API_BASE}{endpoint}'
-    data, _attempts = _post_with_retry(url, body, headers, retries=retries, logger=logger)
-    return data
+        return data
+    except requests.exceptions.Timeout:
+        raise OzonAPIError('Ozon API 请求超时')
+    except requests.exceptions.ConnectionError:
+        raise OzonAPIError('无法连接 Ozon API 服务器')
+    except requests.exceptions.RequestException as e:
+        raise OzonAPIError(f'请求异常: {str(e)}')
 
 
 def _cache_get(key, ttl=None):
@@ -334,7 +217,7 @@ def get_category_tree(language='ZH_HANS', client_id=None, api_key=None, use_cach
         if cached:
             return cached
 
-    result = _call_ozon_api('/v1/description-category/tree', {
+    result = _call_category_api('/v1/description-category/tree', {
         'language': language,
     }, client_id, api_key)
 
@@ -628,7 +511,7 @@ def get_category_attributes(description_category_id, type_id, language='ZH_HANS'
         if cached:
             return cached
 
-    result = _call_ozon_api('/v1/description-category/attribute', {
+    result = _call_category_api('/v1/description-category/attribute', {
         'description_category_id': description_category_id,
         'type_id': type_id,
         'language': language,
@@ -656,7 +539,7 @@ def get_attribute_values(description_category_id, type_id, attribute_id,
         if cached:
             return cached
 
-    result = _call_ozon_api('/v1/description-category/attribute/values', {
+    result = _call_category_api('/v1/description-category/attribute/values', {
         'description_category_id': description_category_id,
         'type_id': type_id,
         'attribute_id': attribute_id,
@@ -684,7 +567,7 @@ def search_attribute_values(description_category_id, type_id, attribute_id, quer
     if cached:
         return cached
 
-    result = _call_ozon_api('/v1/description-category/attribute/values', {
+    result = _call_category_api('/v1/description-category/attribute/values', {
         'description_category_id': description_category_id,
         'type_id': type_id,
         'attribute_id': attribute_id,
@@ -714,7 +597,7 @@ def get_attribute_values_full(description_category_id, type_id, attribute_id,
     limit = 2000
 
     while True:
-        result = _call_ozon_api('/v1/description-category/attribute/values', {
+        result = _call_category_api('/v1/description-category/attribute/values', {
             'description_category_id': description_category_id,
             'type_id': type_id,
             'attribute_id': attribute_id,
@@ -762,124 +645,6 @@ def get_import_info(task_id, client_id=None, api_key=None):
     """
     return _call_ozon_api('/v1/product/import/info', {
         'task_id': task_id,
-    }, client_id, api_key)
-
-
-def import_product_pictures(product_id, images=None, color_image=None, images360=None,
-                            client_id=None, api_key=None, chunk_size=None):
-    """【图片专用通道】上传/更新已创建商品的图片（Ozon /v1/product/pictures/import）
-
-    为什么必须单独走这个接口：
-    - 图片如果只"夹带"在 /v3/product/import 里，Ozon 是**异步**处理的，且
-      import 状态接口只回商品级错误，图片失败会被完全吞掉 —— 表现为
-      "上架成功但图片没上/不显示"，且无从排查。
-    - 本接口是 Ozon 的图片专用通道，提交后会返回每张图的处理状态；
-      配合 get_product_pictures_info 可以拿到每张图的最终结果与错误。
-    - color_image（营销颜色样本）在这里原生支持，比塞进 v3 import 更规范。
-
-    分批提交（P0 稳定性修复）：
-    - 此前把全部图片打包成**一次**请求，Ozon 会整批校验，只要有一张图不合规
-      整批都会被拒（VALIDATION ERROR），且已成功的图也白提交。
-    - 现在按 chunk_size（默认 6 张）分批提交，单批失败不影响其它批次，
-      并返回每批的成功/失败明细，便于上层判断"部分成功"。
-
-    Args:
-        product_id: Ozon 商品 ID（注意是 Ozon 的 product_id，不是 offer_id）
-        images: 图片 URL 数组，最多 30 张，**第一张会被设为主图**
-        color_image: 营销颜色样本（单张 URL）
-        images360: 360 环绕图，最多 70 张
-        chunk_size: 每批提交的图片数量，默认 6；传 0 或 None 之外的负数则不分批
-
-    Returns:
-        dict: { "result": { "pictures": [...] }, "partial": bool,
-                "failed_chunks": [...], "submitted": int, "attempts": int }
-    """
-    clean_images = [u for u in (images or []) if u][:30]
-
-    # 计算分批：images360 与 color_image 体积小，不参与分批
-    size = 6 if chunk_size is None else int(chunk_size)
-    if size <= 0 or len(clean_images) <= size:
-        chunks = [clean_images] if clean_images else []
-    else:
-        chunks = [clean_images[i:i + size] for i in range(0, len(clean_images), size)]
-
-    # 无图片时仍需提交 color_image / images360
-    if not chunks:
-        chunks = [None]
-
-    merged_pictures = []
-    failed_chunks = []
-    submitted = 0
-    total_attempts = 0
-    first_error = None
-
-    for idx, chunk in enumerate(chunks):
-        body = {'product_id': int(product_id)}
-        if chunk:
-            body['images'] = chunk
-        # 附件只在第一批带，避免重复提交
-        if idx == 0:
-            if color_image:
-                body['color_image'] = color_image
-            if images360:
-                body['images360'] = [u for u in images360 if u][:70]
-
-        try:
-            data, attempts = _call_ozon_api_with_attempts(
-                '/v1/product/pictures/import', body, client_id, api_key)
-            total_attempts += attempts
-            submitted += len(chunk or [])
-            for pic in ((data or {}).get('result') or {}).get('pictures') or []:
-                merged_pictures.append(pic)
-        except Exception as e:
-            if first_error is None:
-                first_error = e
-            failed_chunks.append({
-                'chunk_index': idx,
-                'count': len(chunk or []),
-                'urls': chunk or [],
-                'error': str(e),
-            })
-
-    # 全部批次都失败 -> 按原语义抛异常，让上层记录明确失败
-    if failed_chunks and submitted == 0:
-        raise first_error if first_error else OzonAPIError('图片提交失败')
-
-    return {
-        'result': {'pictures': merged_pictures},
-        'partial': bool(failed_chunks),
-        'failed_chunks': failed_chunks,
-        'submitted': submitted,
-        'chunk_total': len(chunks),
-        'attempts': total_attempts,
-    }
-
-
-def _call_ozon_api_with_attempts(endpoint, body, client_id, api_key):
-    """内部：调用 Ozon API 并返回 (data, attempts)，供分批提交统计重试次数"""
-    if not client_id or not api_key:
-        client_id, api_key = _get_store_credentials()
-    if not client_id or not api_key:
-        raise OzonAPIError('未配置 Ozon API 凭证，请先在店铺管理中添加 API Key', 401)
-    headers = {
-        'Client-Id': client_id,
-        'Api-Key': api_key,
-        'Content-Type': 'application/json',
-    }
-    return _post_with_retry(f'{OZON_API_BASE}{endpoint}', body, headers)
-
-
-def get_product_pictures_info(product_ids, client_id=None, api_key=None):
-    """【图片核查通道】查询商品图片的最终状态与错误（Ozon /v2/product/pictures/info）
-
-    Returns:
-        dict: { "items": [ {product_id, primary_photo[], photo[], color_photo[],
-                            photo_360[], errors[]} ] }
-    """
-    if not isinstance(product_ids, (list, tuple)):
-        product_ids = [product_ids]
-    return _call_ozon_api('/v2/product/pictures/info', {
-        'product_id': [str(pid) for pid in product_ids if pid],
     }, client_id, api_key)
 
 
@@ -1248,68 +1013,59 @@ def list_finance_transactions(date_from, date_to, transaction_type='all',
     return _call_ozon_api('/v3/finance/transaction/list', body, client_id, api_key)
 
 
-# ============================================================================
-# 财务应计明细（新接口）
-# ============================================================================
-# ⚠️ 背景：Ozon 已于 2026-09-08 停用 /v3/finance/transaction/list 与
-#    /v3/finance/transaction/totals，调用会返回：
-#        obsolete method cannot be used
-#    官方给出的替代方法是 /v1/finance/accrual/postings、/types、/by-day。
-#    注意这**不是简单的版本号替换**——请求参数与返回结构都变了：
-#      · by-day 一次只接受【单日】（Date 必须 10 位 YYYY-MM-DD），没有区间参数
-#      · 详情要按天循环拉取，或改用 postings（按发货单号，1~200 个/次）
-#      · 金额从 amount 变成 total_amount.amount，费用细项在 item_fees / non_item_fee
-# ============================================================================
-
-def get_finance_accruals_by_day(date_str, client_id=None, api_key=None, last_id=''):
-    """按【单日】拉取 Ozon 应计明细
-
-    Ozon 接口: POST /v1/finance/accrual/by-day
-    请求体: {date: 'YYYY-MM-DD'[, last_id: '...']}
-    响应:   {accruals: [...], last_id: ''}   last_id 非空表示还有下一页
-
-    Args:
-        date_str: 'YYYY-MM-DD'（必须正好 10 个字符，传区间会 400）
-    """
-    body = {'date': str(date_str)}
-    if last_id:
-        body['last_id'] = str(last_id)
-    return _call_ozon_api('/v1/finance/accrual/by-day', body, client_id, api_key)
+def list_finance_accruals_by_day(date, last_id='', client_id=None, api_key=None):
+    """拉取指定日期的财务 начисления，使用 Ozon 新版游标分页接口。"""
+    return _call_ozon_api(
+        '/v1/finance/accrual/by-day',
+        {'date': date, 'last_id': last_id}, client_id, api_key
+    )
 
 
-def get_finance_accrual_types(client_id=None, api_key=None):
-    """拉取应计类型字典（一次返回全部，实测约 124 种）
-
-    Ozon 接口: POST /v1/finance/accrual/types（无参数）
-    响应:   {accrual_types: [{id, name, description}]}
-            name 是英文机器名（如 Acquiring），description 是俄文说明（如 Эквайринг）
-    """
+def list_finance_accrual_types(client_id=None, api_key=None):
+    """读取财务 начисления 类型字典。"""
     return _call_ozon_api('/v1/finance/accrual/types', {}, client_id, api_key)
 
+def _call_ozon_api_get(endpoint, client_id=None, api_key=None):
+    """GET 版 Ozon Seller API 调用（部分接口只支持 GET，如 /v1/actions）"""
+    if not client_id or not api_key:
+        client_id, api_key = _get_store_credentials()
 
-def get_finance_accruals_by_postings(posting_numbers, client_id=None, api_key=None):
-    """按发货单号批量拉取应计明细（1~200 个/次）
+    if not client_id or not api_key:
+        raise OzonAPIError('未配置 Ozon API 凭证，请先在店铺管理中添加 API Key', 401)
 
-    Ozon 接口: POST /v1/finance/accrual/postings
-    单号格式受正则约束：^[0-9]{1,32}-[0-9]{1,32}-[0-9]{1,32}$
-    """
-    numbers = [str(p) for p in (posting_numbers or [])][:200]
-    if not numbers:
-        raise ValueError('posting_numbers 不能为空')
-    return _call_ozon_api('/v1/finance/accrual/postings',
-                          {'posting_numbers': numbers}, client_id, api_key)
+    headers = {
+        'Client-Id': client_id,
+        'Api-Key': api_key,
+        'Content-Type': 'application/json',
+    }
 
-# ========== 促销活动（Actions / Promos）==========
-# 用于「自动移除促销」功能：读取活动、识别平台自动拉入(AUTO)的商品、移除出活动。
-# 接口实测要点（Client-Id 5057369）：
-#   - GET  /v1/actions                           活动清单（含 auto_add_dates）
-#   - POST /v1/actions/products                  活动内商品（含 add_mode: AUTO/MANUAL）
-#   - POST /v1/actions/products/deactivate       移除商品出活动（{action_id, product_ids[]}）
-#   - POST /v1/actions/auto-add/products/candidates  自动添加候选（action_id + auto_add_date 均必填）
-#   - POST /v1/actions/auto-add/products/delete  从自动添加名单移除（需 auto_add_date）
-# 注意：Ozon 没有删除活动本身的接口，只能把商品移出活动。
+    url = f'{OZON_API_BASE}{endpoint}'
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        try:
+            data = resp.json()
+        except ValueError:
+            raise OzonAPIError(
+                f'Ozon API 返回非 JSON 响应 (HTTP {resp.status_code}): {resp.text[:200]}',
+                resp.status_code
+            )
+
+        if resp.status_code != 200:
+            raise OzonAPIError(
+                f'Ozon API 错误: {data.get("message", resp.text)}',
+                resp.status_code
+            )
+
+        return data
+    except requests.exceptions.Timeout:
+        raise OzonAPIError('Ozon API 请求超时')
+    except requests.exceptions.ConnectionError:
+        raise OzonAPIError('无法连接 Ozon API 服务器')
+    except requests.exceptions.RequestException as e:
+        raise OzonAPIError(f'请求异常: {str(e)}')
 
 
+# ===== 促销活动接口（自动移除促销用，2026-10-27 补齐）=====
 def get_actions(client_id=None, api_key=None):
     """拉取店铺的全部促销活动清单
 

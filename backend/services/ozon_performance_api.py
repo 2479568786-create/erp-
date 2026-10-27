@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import io
 import json
+import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -41,6 +43,19 @@ BASE_URL = 'https://api-performance.ozon.ru:443'
 TOKEN_REFRESH_MARGIN = 300
 
 MSK = timezone(timedelta(hours=3))
+
+# ============================================================
+# 导出限额（官方 Limits）
+#   · 单份报表最多 10 个活动、62 天
+#   · 同一账号同时只允许 1 个导出
+# 因此：报表请求必须按 10 个活动分批，且同一进程内串行提交/下载。
+# ============================================================
+MAX_CAMPAIGNS_PER_REPORT = 10
+MAX_REPORT_DAYS = 62
+LIMIT_RETRY_SLEEPS = (3, 8, 20)          # 触发限额后的重试间隔（秒）
+LIMIT_HINTS = ('превышен лимит', 'превышено', 'limit', 'too many')
+
+_EXPORT_LOCK = threading.Lock()
 
 
 class OzonPerformanceError(ValueError):
@@ -178,13 +193,14 @@ def get_token(store_pk: int, force: bool = False) -> str:
 
 def _request(store_pk: int, method: str, path: str, *, body=None,
              params=None, raw=False, binary=False, timeout: int = 60,
-             _retry_auth: bool = True):
+             _retry_auth: bool = True, _retry_limit: int = 2):
     """调用 Performance API。
 
     Args:
         raw:    True 时返回响应原文（文本 CSV 用），否则解析 JSON。
         binary: True 时返回**原始字节**。报表下载接口返回的是 ZIP，
                 若按文本 decode 会破坏压缩数据（BadZipFile），必须走这条路径。
+        _retry_limit: 400「超过限额」的剩余重试次数（导出并发/频次限制是暂时的）
     """
     url = BASE_URL + path
     if params:
@@ -226,6 +242,15 @@ def _request(store_pk: int, method: str, path: str, *, body=None,
             get_token(store_pk, force=True)
             return _request(store_pk, method, path, body=body, params=params,
                             raw=raw, binary=binary, timeout=timeout, _retry_auth=False)
+        # 400 + 「超过限额」：导出并发/频次是暂时性限制，退避后重试
+        if exc.code == 400 and _retry_limit > 0 and any(h in detail.lower() for h in LIMIT_HINTS):
+            attempt = len(LIMIT_RETRY_SLEEPS) - _retry_limit
+            time.sleep(LIMIT_RETRY_SLEEPS[attempt])
+            return _request(
+                store_pk, method, path, body=body, params=params,
+                raw=raw, binary=binary, timeout=timeout,
+                _retry_auth=_retry_auth, _retry_limit=_retry_limit - 1,
+            )
         raise OzonPerformanceError(
             'Ozon 广告接口返回 %d（%s）%s' % (exc.code, path, detail)
         ) from exc
@@ -332,10 +357,18 @@ def cpa_products(store_pk: int, page: int = 1, page_size: int = 100) -> dict:
 
 def cpc_campaign_products(store_pk: int, campaign_id: str,
                           page: int = 1, page_size: int = 100) -> list[dict]:
-    """按点击付费活动内的商品 GET /api/client/campaign/{id}/v2/products"""
+    """按点击付费活动内的商品 GET /api/client/campaign/{id}/v2/products
+
+    ⚠️ 实测返回有两种形态（官方 spec 只写了 {products: [...]}）：
+      · 有的活动/账号直接返回**数组**；
+      · 有的返回 {products: [...]}。
+    两种都要吃，否则会抛 'list' object has no attribute 'get'。
+    """
     result = _request(store_pk, 'GET',
                       '/api/client/campaign/%s/v2/products' % campaign_id,
                       params={'page': page, 'pageSize': page_size})
+    if isinstance(result, list):
+        return result
     items = (result or {}).get('products')
     return items if isinstance(items, list) else []
 
@@ -496,15 +529,24 @@ def parse_report_csv(campaign_id: str, text: str) -> list[dict]:
 
 def campaign_report_rows(store_pk: int, campaign_ids, date_from: str, date_to: str,
                          group_by: str = 'DATE', timeout: int = 180) -> list[dict]:
-    """一站式：提交 → 等待 → 下载 → 解析，返回逐日逐 SKU 的统计行。"""
-    if not campaign_ids:
+    """一站式：提交 → 等待 → 下载 → 解析，返回逐日逐 SKU 的统计行。
+
+    官方限额：单份报表最多 10 个活动、同一账号同时只允许 1 个导出。
+    这里按 10 个活动分批，并在进程内串行执行导出（_EXPORT_LOCK），
+    否则活动数 >10 的店铺会直接吃到 400「Превышен лимит」。
+    """
+    ids = [str(c).strip() for c in (campaign_ids or []) if str(c).strip()]
+    if not ids:
         return []
-    uuid = submit_campaign_report(store_pk, campaign_ids, date_from, date_to, group_by)
-    wait_for_report(store_pk, uuid, timeout=timeout)
-    blob = download_report(store_pk, uuid)
-    out = []
-    for campaign_id, text in _split_report_blob(blob):
-        out.extend(parse_report_csv(campaign_id, text))
+    out: list[dict] = []
+    for start in range(0, len(ids), MAX_CAMPAIGNS_PER_REPORT):
+        chunk = ids[start:start + MAX_CAMPAIGNS_PER_REPORT]
+        with _EXPORT_LOCK:
+            uuid = submit_campaign_report(store_pk, chunk, date_from, date_to, group_by)
+            wait_for_report(store_pk, uuid, timeout=timeout)
+            blob = download_report(store_pk, uuid)
+        for campaign_id, text in _split_report_blob(blob):
+            out.extend(parse_report_csv(campaign_id, text))
     return out
 
 
@@ -526,3 +568,112 @@ def test_connection(store_pk: int) -> dict:
             for c in campaigns[:5]
         ],
     }
+
+
+# ============================================================
+# 写操作：预算 / 出价（建议 3）
+#
+# 金额单位：Ozon Performance API 的预算与出价都是「百万分之一卢布」
+#   （1 000 000 = 1 ₽）。所有对外函数仍用「卢布」作为参数和返回值，
+#   只有真正发给 Ozon 的报文才转成 micros。
+# ============================================================
+
+MICROS_PER_RUB = 1_000_000
+
+
+def rub_to_micros(rub) -> str:
+    """卢布 → micros 字符串（Ozon 要求字符串形式的 uint64）。"""
+    value = float(rub or 0)
+    if value < 0:
+        raise OzonPerformanceError('金额不能为负：%s' % rub)
+    return str(int(round(value * MICROS_PER_RUB)))
+
+
+def micros_to_rub(micros) -> float:
+    """micros → 卢布（保留 2 位）。"""
+    try:
+        return round(float(micros or 0) / MICROS_PER_RUB, 2)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def find_campaign(store_pk: int, campaign_id) -> dict | None:
+    """在活动列表里按 id 找单个活动（Ozon 没有单活动详情端点）。"""
+    target = str(campaign_id)
+    for campaign in list_all_campaigns(store_pk):
+        if str(campaign.get('id')) == target:
+            return campaign
+    return None
+
+
+def patch_campaign(store_pk: int, campaign_id, fields: dict) -> dict:
+    """PATCH /api/client/campaign/{campaignId}——改预算/档期/特展/自动加价。
+
+    只透传官方支持的字段，避免把前端多出来的键发过去被 400。
+    budgets 用 micros 字符串；调用方传「卢布」请先经 rub_to_micros()。
+    """
+    allowed = {
+        'fromDate', 'toDate', 'budget', 'dailyBudget', 'weeklyBudget',
+        'autoIncreasePercent', 'ProductAdvPlacements', 'autopilot',
+    }
+    body = {k: v for k, v in (fields or {}).items() if k in allowed and v is not None}
+    if not body:
+        raise OzonPerformanceError('没有可更新的活动字段')
+    return _request(store_pk, 'PATCH', '/api/client/campaign/%s' % campaign_id, body=body)
+
+
+def list_campaign_products_all(store_pk: int, campaign_id,
+                               page_size: int = 100, max_pages: int = 20) -> list[dict]:
+    """拉全某个 CPC 活动下的商品与当前出价（GET .../v2/products 分页）。"""
+    products: list[dict] = []
+    for page in range(1, max_pages + 1):
+        result = cpc_campaign_products(store_pk, campaign_id, page=page, page_size=page_size)
+        # cpc_campaign_products 已把两种返回形态（数组 / {products:[...]}）归一成数组
+        batch = result if isinstance(result, list) else ((result or {}).get('products') or [])
+        if not batch:
+            break
+        products.extend(batch)
+        if len(batch) < page_size:
+            break
+    return products
+
+
+def update_campaign_product_bids(store_pk: int, campaign_id, bids) -> dict:
+    """PUT /api/client/campaign/{campaignId}/products——覆盖式更新商品出价。
+
+    bids: [{'sku': '123', 'bid_rub': 12.5}] 或 [{'sku': '123', 'bid_micros': '12500000'}]
+    ⚠️ 该接口是「覆盖」语义：只传要保留的商品，未列出的会被移除。
+    """
+    payload = []
+    for item in bids or []:
+        sku = str((item or {}).get('sku') or '').strip()
+        if not sku:
+            continue
+        if 'bid_micros' in (item or {}) and item.get('bid_micros') not in (None, ''):
+            micros = str(item['bid_micros'])
+        else:
+            micros = rub_to_micros(item.get('bid_rub'))
+        payload.append({'sku': sku, 'bid': micros})
+    if not payload:
+        raise OzonPerformanceError('没有可更新的商品出价')
+    return _request(store_pk, 'PUT', '/api/client/campaign/%s/products' % campaign_id,
+                    body={'bids': payload})
+
+
+def get_min_sku_bid(store_pk: int, skus, payment_type: str = 'CPC') -> dict:
+    """POST /api/client/min/sku——按 SKU 查最低出价（改价时的下限校验）。"""
+    items = [str(s).strip() for s in (skus or []) if str(s).strip()]
+    if not items:
+        return {}
+    return _request(store_pk, 'POST', '/api/client/min/sku',
+                    body={'skus': items, 'paymentType': payment_type})
+
+
+def get_cpo_min_bids(store_pk: int, skus) -> dict:
+    """POST /api/client/search_promo/get_cpo_min_bids——按订单付费的固定费率（只读参考）。"""
+    items = [str(s).strip() for s in (skus or []) if str(s).strip()]
+    if not items:
+        return {}
+    return _request(store_pk, 'POST', '/api/client/search_promo/get_cpo_min_bids',
+                    body={'skus': items})
+

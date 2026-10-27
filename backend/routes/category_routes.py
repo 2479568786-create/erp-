@@ -8,6 +8,20 @@ from utils.response import success_response, error_response, handle_errors
 category_bp = Blueprint('categories', __name__)
 
 
+def _category_selector_tree(tree):
+    """Trim the shared category tree to fields used by the category selector."""
+    def category_node(node, level):
+        keys = ('type_id', 'type_name', 'type_name_zh', 'type_name_ru', 'disabled') if level == 3 else (
+            'description_category_id', 'category_name', 'category_name_zh', 'category_name_ru', 'disabled'
+        )
+        result = {key: node.get(key) for key in keys if key in node}
+        if level < 3:
+            result['children'] = [category_node(child, level + 1) for child in node.get('children', [])]
+        return result
+
+    return [category_node(node, 1) for node in tree]
+
+
 @category_bp.route('/categories', methods=['GET'])
 @handle_errors
 def get_categories():
@@ -24,6 +38,8 @@ def get_categories():
 
     try:
         tree = get_category_tree_bilingual(use_cache=(refresh != '1'))
+        if request.args.get('view') == 'selector':
+            tree = _category_selector_tree(tree)
         return success_response(data=tree, msg=f'从 Ozon API 拉取类目树（{len(tree)}个一级类目）')
     except OzonAPIError as e:
         return error_response(msg=str(e), code=e.status_code or 500)
@@ -250,11 +266,17 @@ def match_category_endpoint():
     body = request.get_json(silent=True) or {}
     source_category = body.get('category', '')
     source_platform = body.get('platform', 'ozon')
+    title = body.get('title', '')
+    description = body.get('description', '')
 
     if not source_category:
         return error_response(msg='缺少 category 参数（不再从标题推断类目）', code=400)
 
-    result = do_match(source_category, source_platform)
+    if body.get('prioritize_title') and title:
+        from services.ai_category_matcher import ai_match_category
+        result = ai_match_category(source_category, title, description, prioritize_title=True)
+    else:
+        result = do_match(source_category, source_platform, title, description)
     return success_response(data=result, msg='匹配成功' if result.get('matched') else '未找到匹配类目')
 
 
@@ -272,12 +294,14 @@ def ai_match_category_endpoint():
 
     body = request.get_json(silent=True) or {}
     source_category = body.get('category', '')
+    title = body.get('title', '')
     description = body.get('description', '')
 
     if not source_category:
         return error_response(msg='缺少 category 参数（不再从标题推断类目）', code=400)
 
-    result = ai_match_category(source_category, '', description)
+    result = ai_match_category(source_category, title, description,
+                               prioritize_title=bool(body.get('prioritize_title')))
     return success_response(data=result, msg='AI匹配成功' if result.get('matched') else 'AI匹配未成功')
 
 

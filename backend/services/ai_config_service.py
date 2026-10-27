@@ -53,30 +53,6 @@ _PRESET_PROVIDERS = {
         'enabled': False,
         'description': '任何 OpenAI 兼容接口',
     },
-    'apiyi': {
-        'name': 'APIYI',
-        'api_key': '',
-        'base_url': 'https://api.apiyi.com/v1',
-        'model': 'gpt-image-2.5-all',
-        'enabled': True,
-        'description': 'APIYI 聚合图片模型，兼容 gpt-image-2.5-all',
-    },
-    'apiyi_banana': {
-        'name': 'APIYI · Nano Banana Pro',
-        'api_key': '',
-        'base_url': 'https://api.apiyi.com',
-        'model': 'gemini-3-pro-image-preview',
-        'enabled': True,
-        'description': 'APIYI Google Nano Banana Pro，支持参考图编辑',
-    },
-    'yyds': {
-        'name': 'YYDS',
-        'api_key': '',
-        'base_url': 'https://yyds.chybenzun.top/v1',
-        'model': 'gpt-image-2-cf',
-        'enabled': True,
-        'description': 'YYDS GPT Image，支持参考图编辑与精确尺寸',
-    },
     'lingkeai': {
         'name': '凌科 AI',
         'api_key': '',
@@ -270,7 +246,7 @@ def _mask_key(key):
     return key[:4] + '****' + key[-4:]
 
 
-def call_text_model(config, messages, temperature=0.7, max_tokens=2000, json_output=False, timeout=30):
+def call_text_model(config, messages, temperature=0.7, max_tokens=2000, json_output=False, timeout=30, thinking=None):
     """调用已配置的文本模型，兼容 OpenAI 与 YandexGPT 原生协议。"""
     import urllib.request
 
@@ -309,6 +285,8 @@ def call_text_model(config, messages, temperature=0.7, max_tokens=2000, json_out
         }
         if json_output:
             payload['response_format'] = {'type': 'json_object'}
+        if thinking:
+            payload['thinking'] = thinking
         url = base_url + '/chat/completions'
         auth_header = f'Bearer {api_key}'
 

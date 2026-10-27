@@ -113,6 +113,43 @@ def _collect_urls(value):
     return out
 
 
+def _output_urls(info):
+    """只返回任务「生成结果」的图片 URL。
+
+    关键坑（2026-10-28 线上事故）：task-status 响应里 ``input_files`` 是**用户上传的参考图**，
+    递归扫全部 URL 会把参考图也当成生成结果存进图库（业务员看到一堆白底商品图），
+    还会让计费按「参考图 + 真图」多扣一张。所以这里优先取 ``result_urls`` / ``result_url``，
+    只有在都没有时才回退到递归收集，并且先裁剪掉输入相关字段。
+    """
+    urls = []
+    if isinstance(info, dict):
+        for key in ('result_urls', 'output_urls', 'urls', 'images'):
+            value = info.get(key)
+            if isinstance(value, list):
+                urls.extend(str(item).strip() for item in value
+                            if isinstance(item, str) and item.strip().startswith('http'))
+        for key in ('result_url', 'output_url'):
+            value = info.get(key)
+            if isinstance(value, str) and value.strip().startswith('http'):
+                urls.append(value.strip())
+    seen, out = set(), []
+    for url in urls:
+        if url not in seen:
+            seen.add(url)
+            out.append(url)
+    if out:
+        return out
+
+    pruned = {}
+    for key, value in (info or {}).items():
+        if str(key).lower() in ('input_files', 'input_file', 'inputs', 'input',
+                                'params', 'request', 'reference', 'references',
+                                'source_files', 'source'):
+            continue
+        pruned[key] = value
+    return _collect_urls(pruned)
+
+
 def generate_image(prompt, aspect_ratio='3:4', image_size='2K', images=None,
                    model=MODEL, timeout=DEFAULT_TIMEOUT):
     """提交生图任务并轮询到结束，返回 {urls, task_id, cost, model}。"""
@@ -147,7 +184,7 @@ def generate_image(prompt, aspect_ratio='3:4', image_size='2K', images=None,
         if info.get('is_final'):
             state = (info.get('state') or '').lower()
             if state == 'success':
-                urls = _collect_urls(info)
+                urls = _output_urls(info)
                 if not urls:
                     raise JLCError('任务成功但没有取到图片地址')
                 return {'urls': urls, 'task_id': task_id, 'cost': info.get('cost'), 'model': model}

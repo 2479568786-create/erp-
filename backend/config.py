@@ -49,6 +49,11 @@ class Config:
             'CORS_ALLOWED_ORIGINS', '*'
         ).split(',') if o.strip()
     ] or ['*']
+    PUBLIC_IMAGE_PROXY_HOSTS = [
+        host.strip().lower().rstrip('.')
+        for host in os.environ.get('PUBLIC_IMAGE_PROXY_HOSTS', '').split(',')
+        if host.strip()
+    ]
 
     # 数据文件路径
     PRODUCTS_FILE = os.path.join(DATA_DIR, 'products.json')
@@ -108,7 +113,7 @@ class Config:
     # 七牛云绑定域名（CDN 加速域名），如 https://cdn.example.com
     QINIU_DOMAIN = os.environ.get('QINIU_DOMAIN', '')
 
-    # 阿里云 OSS 对象存储（可选）
+    # ===== 阿里云 OSS 对象存储 =====
     OSS_ACCESS_KEY_ID = os.environ.get('OSS_ACCESS_KEY_ID', '')
     OSS_ACCESS_KEY_SECRET = os.environ.get('OSS_ACCESS_KEY_SECRET', '')
     OSS_BUCKET = os.environ.get('OSS_BUCKET', '')

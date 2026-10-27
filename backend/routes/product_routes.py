@@ -8,7 +8,8 @@ import re
 from flask import Blueprint, request
 from models.product import Product, PublishRecord
 from utils.response import success_response, error_response, paginate_response, handle_errors
-from utils.auth import require_login, get_current_user, visible_store_pks, visible_ozon_store_ids
+from utils.auth import (require_login, get_current_user, visible_store_pks,
+                        visible_ozon_store_ids)
 from utils.validators import extract_pagination
 from services.platform_sku_service import ensure_platform_sku_codes
 
@@ -932,23 +933,20 @@ def _merge_attributes_with_rich_content(existing_attrs, incoming_attrs, force_re
 def get_products():
     """获取商品列表（支持分页、状态筛选、关键词搜索）
 
-    权限：管理员全量；业务员默认仅本人绑定店铺相关的采集商品（storeId 匹配）。
-    例外：`scope=collect`（采集箱）。业务员可以进入采集箱，但**只能看到属于自己的
-    商品**：商品 own 判据 = assignee 是自己 / storeId 是自己店铺 / 该商品有自己店铺
-    的发布记录（发布记录里的 storeId 是 Ozon 店铺 ID，需经 stores.store_id → account_id
-    映射）。**不看发布状态**，所以上架失败（failed / published_with_error）的同样可见。
-    没有任何归属痕迹的采集品（未上架、未分配）对业务员不可见，只有管理员能看到。
+    权限：管理员全量；业务员仅本人绑定店铺相关的采集商品（storeId 匹配）
     """
     user = get_current_user()
     pagination = extract_pagination(request.args)
     status = request.args.get('status', '')
     keyword = request.args.get('keyword', '')
     group = request.args.get('group', '')
+    # 采集箱（scope=collect）：业务员可进入，但只看属于自己的商品
     scope = (request.args.get('scope', '') or '').strip().lower()
     summary = request.args.get('summary') == '1'
 
     # 角色强制过滤：业务员仅可见自己归属店铺的商品
-    # 采集箱（scope=collect）走「本人商品」判据（含上架失败的），不套用共享区
+    # 采集箱走「本人商品」判据：assignee 是自己 / storeId 是自己店铺 /
+    # 该商品有自己店铺的发布记录（含上架失败）。不看发布状态 → 失败记录同样可见。
     visible_pks = None
     owned_product_ids = None
     own_ozon_store_ids = None
@@ -1001,7 +999,7 @@ def get_products():
                     or pid in (all_owned_product_ids or set())
                 if mine or not has_owner:
                     filtered.append(p)
-            # 未绑定店铺（无 storeId）且没有自己归属痕迹的商品业务员不可见
+            # 未绑定店铺且无本人归属痕迹的商品，业务员不可见
     if status:
         filtered = [p for p in filtered if p.get('status') == status]
     if group:
@@ -1525,13 +1523,9 @@ def collect_product():
             prod_desc = product_data.get('description', '') or ''
             if prod_title.strip() or prod_desc.strip():
                 try:
-                    # 这里原先直接调用 match_category(...)，但本模块从未导入过该名字，
-                    # 于是每次都抛 NameError，被下面的 except 吞掉 —— 表现为
-                    # categoryMatch.reason = "多信号匹配异常: name 'match_category' is not defined"，
-                    # 即"采集器没抓到类目时自动匹配永远不生效"。
-                    from services.ozon_api import match_category
                     print(f'[采集] source_category 为空，启用多信号 AI 匹配: title={prod_title[:40]!r}')
-                    match_result = match_category(
+                    from services.category_matcher import match_category as _smart_match_category
+                    match_result = _smart_match_category(
                         '',
                         product_data.get('platform', 'ozon'),
                         title=prod_title,
@@ -1590,23 +1584,6 @@ def collect_product():
     _normalize_publish_fields_for_persistence(product_data)
     product = Product.create(product_data)
     print(f'[采集] 商品创建成功: id={product.get("id")}')
-
-    # 自动填入「我的选品」：日常上品时商品名称自动进入当前账号的选品台账（采购链接/贴单费人工补充）
-    try:
-        _cur = get_current_user()
-        if _cur and _cur.get('id'):
-            from models.my_selection import MySelection
-            _name = (product.get('title') or product_data.get('title') or '').strip()
-            if _name and not MySelection.find_by_source_product(_cur['id'], product.get('id')):
-                MySelection.create(_cur['id'], {
-                    'product_name': _name,
-                    'purchase_url': '',
-                    'sticker_fee': 0,
-                    'source_product_id': product.get('id'),
-                    'auto_filled': 1,
-                })
-    except Exception as _e:
-        print(f'[我的选品] 自动填入失败: {_e}')
     print(f'[采集] 类目匹配结果: {product_data.get("categoryMatch", {}).get("matched", False)}, 类目={product_data.get("categoryMatch", {}).get("label", "")}')
     print(f'[采集] ===== 采集完成（新商品创建） =====\n')
     return success_response(data=product, msg="采集成功" + ('，类目已自动匹配' if product_data.get('categoryMatch', {}).get('matched') else '，类目待匹配'))
