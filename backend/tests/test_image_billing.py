@@ -1,6 +1,6 @@
 """生图计费（余额/开关/扣点/外部接口）单元测试。
 
-运行：cd backend && python -m unittest tests.test_image_billing -v
+运行：cd backend && .venv/bin/python -m unittest tests.test_image_billing -v
 """
 import os
 import sqlite3

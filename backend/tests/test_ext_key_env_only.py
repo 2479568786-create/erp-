@@ -18,8 +18,7 @@ from flask import Flask
 from utils import ext_auth
 from routes import jlc_ext_routes, ozon_collect_routes
 
-# 旧内置默认值（已下线）；真实值不入公开库，这里只用等价占位串
-LEGACY_DEFAULT = 'legacy-builtin-default-key'
+LEGACY_DEFAULT = 'legacy-default-key-not-configured'
 
 
 class ExtKeyEnvOnlyTests(unittest.TestCase):
