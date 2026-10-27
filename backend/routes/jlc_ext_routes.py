@@ -28,7 +28,7 @@ JLC_TIMEOUT = 30
 
 
 def _plugin_api_key():
-    """插件 API Key：只读环境变量 EXT_API_KEY，未配置则返回空串（按未授权处理）。"""
+    """插件 API Key：只读环境变量 EXT_API_KEY；未配置返回空串（等价未授权，不再有默认值）。"""
     import os
     return os.environ.get('EXT_API_KEY') or ''
 

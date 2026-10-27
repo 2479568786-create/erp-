@@ -1,7 +1,7 @@
 """/api/ext/* 插件/外部机器人接口的共用鉴权。
 
 与采集插件同一把 key（环境变量 OZON_EXT_API_KEYS，逗号分隔支持轮换；
-回退 EXT_API_KEY，最后回退内置默认值，与 ozon_collect_routes 保持一致），
+回退 EXT_API_KEY；**不内置默认值**，未配置即未授权），
 另外允许 ERP 管理员登录态直接调用（方便页面/排障）。
 """
 import os
@@ -11,10 +11,8 @@ from flask import request
 
 from utils.auth import get_current_user
 
-
 def plugin_api_keys():
-    """插件 API Key 白名单：只读 OZON_EXT_API_KEYS（逗号分隔）或 EXT_API_KEY；
-    两者都未配置时返回空列表（所有 /api/ext/* 请求按未授权处理）。"""
+    """插件 API Key 白名单：OZON_EXT_API_KEYS（逗号分隔）> EXT_API_KEY；未配置返回空列表。"""
     raw = os.environ.get('OZON_EXT_API_KEYS') or os.environ.get('EXT_API_KEY') or ''
     return [item.strip() for item in str(raw).split(',') if item.strip()]
 

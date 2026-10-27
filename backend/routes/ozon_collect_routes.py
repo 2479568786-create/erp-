@@ -43,7 +43,7 @@ ALLOWED_EXT = {'jpg', 'jpeg', 'png', 'webp', 'gif'}
 # ---------------------------------------------------------------- 基础工具
 
 def _plugin_api_keys():
-    """插件 API Key 白名单：OZON_EXT_API_KEYS（逗号分隔）> EXT_API_KEY > 默认值。
+    """插件 API Key 白名单：OZON_EXT_API_KEYS（逗号分隔）> EXT_API_KEY；未配置返回空列表。
 
     支持多 key 并行是为了轮换：新 key 上线后旧 key 保留一段时间，
     等所有使用方换成 chrome.storage 配置后再删掉旧值。
