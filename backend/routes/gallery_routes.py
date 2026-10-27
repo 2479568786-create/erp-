@@ -13,6 +13,7 @@ from flask import Blueprint, request, send_from_directory
 from config import DATA_DIR, Config
 from db import execute, query
 from services.ai_config_service import get_ai_config
+from services import jlc_media_service
 from utils.response import success_response, error_response, handle_errors
 
 
@@ -390,3 +391,63 @@ def generate_ai_images():
         detail = f'；下载/保存错误: {save_errors[-1]}' if save_errors else ''
         return error_response(f'模型未返回可保存的图片{detail}', 502)
     return success_response(data={'assets': assets, 'model': model}, msg=f'已生成并保存 {len(assets)} 张图片')
+
+
+# ============================================================
+# JLC GLOBAL 生图（纳米香蕉 2.1）—— 人工提示词 + 参考图
+# 说明：本端点只做「提交任务 → 下载结果 → 落图库」，不参与任何 AI 规划/提示词生成。
+# ============================================================
+@gallery_bp.route('/ai/suite/jlc', methods=['POST'])
+@handle_errors
+def generate_jlc_suite_image():
+    """按人工提示词 + 参考图生成单张套图并保存到图库。"""
+    body = request.get_json(silent=True) or {}
+    prompt = (body.get('prompt') or '').strip()
+    if not prompt:
+        return error_response('缺少提示词')
+    aspect_ratio = str(body.get('aspectRatio') or '3:4').strip()
+    image_size = str(body.get('imageSize') or '2K').strip()
+    module_key = str(body.get('moduleKey') or '').strip()
+    images = body.get('images') or []
+    if not isinstance(images, list):
+        return error_response('images 必须是数组')
+
+    try:
+        result = jlc_media_service.generate_image(
+            prompt, aspect_ratio=aspect_ratio, image_size=image_size, images=images)
+    except Exception as exc:  # noqa: BLE001 - 统一回可读错误
+        return error_response('JLC 生图失败：%s' % exc)
+
+    assets = []
+    for index, url in enumerate(result.get('urls') or [], start=1):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                data = resp.read()
+            ext = 'jpg' if any(k in url.lower() for k in ('.jpg', '.jpeg')) else 'png'
+            assets.append(_save_bytes(
+                data,
+                'ai-suite-%s-%d.%s' % (module_key or 'img', index, ext),
+                source='ai',
+                prompt=prompt,
+                tags=['AI套图'] + ([module_key] if module_key else []),
+                generation_meta={
+                    'provider': 'jlc',
+                    'model': result.get('model') or 'banana-2.1',
+                    'endpoint': '/v1/media/generate',
+                    'reference_count': len(images),
+                    'template_version': 'suite-manual-%s' % (module_key or 'img'),
+                },
+            ))
+        except Exception as exc:  # noqa: BLE001
+            print('[JLC套图] 下载/保存失败 %s: %s' % (url, exc))
+
+    if not assets:
+        return error_response('JLC 已出图但保存失败，请查看服务日志')
+    return success_response(data={
+        'assets': assets,
+        'taskId': result.get('task_id'),
+        'cost': result.get('cost'),
+        'provider': 'jlc',
+        'model': result.get('model'),
+    })
