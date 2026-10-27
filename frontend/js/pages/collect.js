@@ -250,7 +250,7 @@ function loadProducts() {
   const footerBar = document.getElementById('collectFooterBar');
 
   // 从后端 API 加载数据
-  Api.getProducts({ status: currentStatusFilter, pageSize: 200, summary: true }).then(res => {
+  Api.getProducts({ status: currentStatusFilter, pageSize: 200, summary: true, scope: 'collect' }).then(res => {
     let products;
     if (res.code === 200 && res.data?.list) {
       products = res.data.list;

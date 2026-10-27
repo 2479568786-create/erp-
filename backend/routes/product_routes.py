@@ -932,18 +932,23 @@ def _merge_attributes_with_rich_content(existing_attrs, incoming_attrs, force_re
 def get_products():
     """获取商品列表（支持分页、状态筛选、关键词搜索）
 
-    权限：管理员全量；业务员仅本人绑定店铺相关的采集商品（storeId 匹配）
+    权限：管理员全量；业务员默认仅本人绑定店铺相关的采集商品（storeId 匹配）。
+    例外：`scope=collect`（采集箱）是**共享区**，所有登录账号都能看到全部采集商品，
+    不再按店铺归属过滤——采集箱里的商品多数「待归属」（没有 storeId），
+    按店铺过滤会让业务员永远看到一个空箱子（2026-10 反馈：员工看不到采集箱）。
     """
     user = get_current_user()
     pagination = extract_pagination(request.args)
     status = request.args.get('status', '')
     keyword = request.args.get('keyword', '')
     group = request.args.get('group', '')
+    scope = (request.args.get('scope', '') or '').strip().lower()
     summary = request.args.get('summary') == '1'
 
     # 角色强制过滤：业务员仅可见自己归属店铺的商品
+    # 采集箱（scope=collect）不适用该过滤：它是所有账号共享的待处理区
     visible_pks = None
-    if user.get('role') != 'admin':
+    if user.get('role') != 'admin' and scope != 'collect':
         visible_pks = set(visible_store_pks(user) or [])
 
     all_products = Product.find_all()
