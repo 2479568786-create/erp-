@@ -98,6 +98,7 @@ const Api = (() => {
       keyword: params.keyword || '',
       group: params.group || '',
       summary: params.summary ? '1' : '',
+      scope: params.scope || '',
     }).toString();
     return request(`/api/products?${query}`);
   }
