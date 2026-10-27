@@ -12,7 +12,7 @@
 | AI 询盘助手 | `frontend/js/pages/insights.js` | `backend/routes/insight_routes.py` |
 | 商品数据分析 | `frontend/js/pages/seller-insights.js` | `backend/routes/seller_insights_routes.py`、`backend/services/product_analysis_service.py` |
 | JLC 研究 | 公开仓库没有独立 JLC 研究服务及其工作区前端；仅含计算器中的 JLC RETS 定价。 | `backend/services/jlc_pricing_service.py` |
-| 图片管理 | `frontend/js/pages/media.js` | `backend/routes/gallery_routes.py`、`backend/routes/watermark_routes.py`、`backend/routes/pixpix_routes.py`、`backend/services/storage_service.py` |
+| 图片管理 | `frontend/js/pages/media.js` | `backend/routes/gallery_routes.py`、`backend/routes/watermark_routes.py`、`backend/services/storage_service.py` |
 | ERP 整体框架 | `frontend/index.html`、`frontend/js/app.js`、`frontend/js/router.js`、`frontend/js/api.js` | `backend/app.py`、`backend/config.py`、`backend/db.py`、`backend/schema.sql`、`backend/models/`、`backend/routes/`、`backend/services/` |
 
 ## 发布范围说明
