@@ -62,7 +62,9 @@ def _resolve_target_pks(user, body=None):
 def overview():
     """广告监控看板：店铺配置状态 + 当日花费 + 三档商品告警。"""
     user = get_current_user()
-    pks = _visible_pks(user)
+    pks, err = _resolve_target_pks(user)
+    if err:
+        return err
     data = svc.build_overview(pks)
     # 无凭证的店铺一并回报，前端提示去配置
     data['canManage'] = user.get('role') == 'admin'
@@ -78,7 +80,9 @@ def alerts():
     Query: date=YYYY-MM-DD（可选，默认今天 MSK）
     """
     user = get_current_user()
-    pks = _visible_pks(user)
+    pks, err = _resolve_target_pks(user)
+    if err:
+        return err
     stat_date = (request.args.get('date') or '').strip() or None
     return success_response(data=svc.build_alerts(pks, stat_date))
 
@@ -92,7 +96,9 @@ def products():
     Query: type = test_complete | low_ctr | no_conversion（不传则全部）
     """
     user = get_current_user()
-    pks = _visible_pks(user)
+    pks, err = _resolve_target_pks(user)
+    if err:
+        return err
     result = svc.evaluate_products(pks)
     wanted = (request.args.get('type') or '').strip()
     bucket_map = {
@@ -126,7 +132,9 @@ def products():
 def campaigns():
     """已同步的广告活动列表（按店铺过滤）。"""
     user = get_current_user()
-    pks = _visible_pks(user)
+    pks, err = _resolve_target_pks(user)
+    if err:
+        return err
     if not pks:
         return success_response(data={'list': [], 'total': 0})
     ph = ','.join('?' * len(pks))
@@ -208,7 +216,9 @@ def sync():
 def sync_logs():
     """同步日志（管理员看全部，业务员看自己店铺）。"""
     user = get_current_user()
-    pks = _visible_pks(user)
+    pks, err = _resolve_target_pks(user)
+    if err:
+        return err
     if not pks:
         return success_response(data={'list': [], 'total': 0})
     limit = min(int(request.args.get('limit', 50) or 50), 200)

@@ -22,6 +22,7 @@
  */
 const AdMonitorPage = (() => {
   const state = {
+    storePk: null,
     data: null,        // overview 响应
     tab: 'alerts',
     typeFilter: '',
@@ -57,7 +58,8 @@ const AdMonitorPage = (() => {
   // ======================= 数据 =======================
 
   async function load() {
-    const res = await API.get('/api/ad-monitor/overview');
+    const qs = state.storePk ? ('?storePk=' + state.storePk) : '';
+    const res = await API.get('/api/ad-monitor/overview' + qs);
     if (res && res.code === 200) {
       state.data = res.data;
       return res.data;
@@ -119,6 +121,12 @@ const AdMonitorPage = (() => {
             </p>
           </div>
           <div class="store-header-actions">
+            <select id="amStoreFilter" class="btn btn-sm btn-ghost" style="padding:6px 8px;"
+                    onchange="AdMonitorPage.setStore(this.value)">
+              <option value="">全部店铺</option>
+              ${((state.data && state.data.stores) || []).map(s => `
+                <option value="${s.storePk}" ${state.storePk === s.storePk ? 'selected' : ''}>${esc(s.storeName || ('#' + s.storePk))}</option>`).join('')}
+            </select>
             <button class="btn btn-sm btn-ghost" onclick="AdMonitorPage.refresh()">
               <i data-lucide="rotate-cw" style="width:14px;height:14px;"></i> 刷新
             </button>
@@ -355,7 +363,8 @@ const AdMonitorPage = (() => {
   // ======================= Tab 3：广告活动 =======================
 
   async function loadCampaigns() {
-    const res = await API.get('/api/ad-monitor/campaigns');
+    const qs = state.storePk ? ('?storePk=' + state.storePk) : '';
+    const res = await API.get('/api/ad-monitor/campaigns' + qs);
     return (res && res.code === 200) ? (res.data.list || []) : [];
   }
 
@@ -656,6 +665,13 @@ const AdMonitorPage = (() => {
     if (window.lucide) lucide.createIcons();
   }
 
+  function setStore(value) {
+    const next = value ? Number(value) : null;
+    if (next === state.storePk) return;
+    state.storePk = next;
+    refresh();
+  }
+
   async function switchTab(tab) {
     state.tab = tab;
     const body = document.getElementById('amBody');
@@ -671,7 +687,7 @@ const AdMonitorPage = (() => {
   }
 
   return {
-    render, init, refresh, switchTab, sync: doSync,
+    render, init, refresh, switchTab, setStore, sync: doSync,
     openSettings, openCredentials, testStore,
     showDailySpendPopup, fetchDailyAlerts,
     _popupShown: false,
