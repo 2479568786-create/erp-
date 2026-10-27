@@ -29,11 +29,12 @@ function renderGalleryPage() {
 }
 
 function renderAIImagePage() {
-  setTimeout(() => { loadAIGenerationHistory(); Api.getAIModelsStatus().then(showImageModelStatus); toggleAIImageProvider(); sdqApplyImageContext(); }, 0);
+  setTimeout(() => { loadAIGenerationHistory(); Api.getAIModelsStatus().then(showImageModelStatus); toggleAIImageProvider(); sdqApplyImageContext(); loadAIPointBalance(); }, 0);
   return `
     <div class="media-page ai-image-page">
       <div class="media-page-head">
         <div><h2>AI 图片生成</h2><p>单张创作或一次制作完整 Ozon 商品套图</p></div>
+          <span id="aiPointBalance" title="生图点数，1 点 = 1 元" style="font-size:12px;font-weight:600;color:#475467;background:#f2f4f7;border:1px solid #e4e7ec;border-radius:6px;padding:5px 9px;white-space:nowrap;">剩余点数 --</span>
         <button class="btn btn-sm btn-ghost" onclick="Router.navigate('/gallery')"><i data-lucide="images"></i> 我的图库</button>
       </div>
       <div class="ai-image-mode-switch" role="tablist">
@@ -44,7 +45,7 @@ function renderAIImagePage() {
         <aside class="ai-image-controls" id="aiSinglePanel">
           <div class="ai-model-state" id="aiImageModelState"><span class="state-dot"></span><span>正在读取模型配置...</span></div>
           <label class="media-label">图片提供商</label>
-          <select id="aiImageProvider" class="form-select" onchange="toggleAIImageProvider()"><option value="lingkeai" selected>凌科 AI · 纳米香蕉 2.1</option></select>
+          <select id="aiImageProvider" class="form-select" disabled title="生图只支持凌科 AI"><option value="lingkeai" selected>凌科 AI · 纳米香蕉 2.1</option></select>
           <label class="media-label">参考图片 <span style="font-weight:400;color:var(--text-muted);">（可选）</span></label>
           <input id="aiImageReferenceInput" type="file" accept="image/png,image/jpeg,image/webp" hidden onchange="selectAIImageReference(this.files[0])">
           <div class="ai-reference-box" id="aiImageReferenceBox">
@@ -79,7 +80,7 @@ function renderAIImagePage() {
           <div class="ai-suite-reference-box" id="aiSuiteReferenceBox"><button type="button" class="btn btn-sm btn-ghost" onclick="document.getElementById('aiSuiteReferenceInput').click()"><i data-lucide="upload"></i> 上传参考图</button><span>建议上传正面、侧面和细节图</span></div>
           <div class="suite-step"><span>2</span><div><b>填写商品要求</b><small>只使用真实信息，不自动虚构卖点</small></div></div>
           <textarea id="aiSuitePrompt" class="form-textarea" rows="7" maxlength="3000" placeholder="例如：黑色无线耳机，保留原图外观和俄语文字；突出降噪、续航和通勤使用场景，不添加未提供的参数"></textarea>
-          <div class="media-form-row"><div><label class="media-label">图片比例</label><select id="aiSuiteSize" class="form-select"><option value="1024x1360">3:4 竖图</option><option value="1024x1024">1:1 方图</option><option value="1024x1536">2:3 竖图</option></select></div><div><label class="media-label">图片模型</label><select id="aiSuiteProvider" class="form-select"><option value="lingkeai" selected>凌科 AI · 纳米香蕉 2.1</option></select></div></div>
+          <div class="media-form-row"><div><label class="media-label">图片比例</label><select id="aiSuiteSize" class="form-select"><option value="1024x1360">3:4 竖图</option><option value="1024x1024">1:1 方图</option><option value="1024x1536">2:3 竖图</option></select></div><div><label class="media-label">图片模型</label><select id="aiSuiteProvider" class="form-select" disabled title="生图只支持凌科 AI"><option value="lingkeai" selected>凌科 AI · 纳米香蕉 2.1</option></select></div></div>
           <div class="suite-step suite-step-modules"><span>3</span><div><b>选择套图模块</b><small>每个模块生成 1 张图片</small></div></div>
           <div class="ai-suite-modules">${AI_SUITE_MODULES.map(module => `<label class="ai-suite-module is-selected"><input type="checkbox" value="${module.key}" checked onchange="updateAISuiteModuleState(this)"><span><b>${module.name}</b><small>${module.description}</small></span></label>`).join('')}</div>
           <button id="generateSuiteBtn" class="btn btn-primary ai-generate-btn" onclick="generateAISuite()"><i data-lucide="layers"></i> 生成 Ozon 套图</button>
@@ -235,12 +236,44 @@ function buildAISuitePrompt(module, userPrompt, ratio, plan = {}) {
   return `当前只生成一个模块：${module.name}（${module.ruTitle}）。不要执行其他模块的任务。\n\n当前模块目标：${plan.goal || module.description}\n当前模块构图：${plan.composition || module.instruction}\n当前模块允许使用的真实事实：${plan.facts || userPrompt}\n当前模块俄语文案：${plan.copy || module.textMode}\n${templateRules}\n模型必须一次性完成商品、背景、构图、光影、俄语文字、图标和信息层级的最终成图；不要把文字、图标或版式留给 ERP 后期，不要输出无文字底图。严格使用上面的俄语文案，文字必须清晰、完整、可读，只能使用俄语西里尔字母，不得出现中文、乱码或无意义伪文字。\n画布必须使用 ${ratio} 比例。参考图是最高优先级，必须复制参考图中实际可见的商品、颜色、结构和配件；参考图中没有的物品一律禁止新增；如果参考图中的配件是入耳式或有线耳机，必须保持原样，禁止改成头戴式耳机。只使用当前模块事实；不添加未提供的参数、认证、配件或功能；不要添加水印、价格、折扣、二维码、联系方式或购买引导。`;
 }
 
+async function generateAIImage() {
+  const prompt = document.getElementById('aiImagePrompt')?.value.trim();
+  if (!prompt) return Toast.show('请输入图片描述', 'warning');
+  const size = document.getElementById('aiImageSize')?.value || '1024x1024';
+  const count = Number(document.getElementById('aiImageCount')?.value || 1);
+  const btn = document.getElementById('generateImageBtn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="media-spinner"></span> 正在生成'; }
+  try {
+    const response = await Api.request('/api/ai/images/generate', {
+      method: 'POST',
+      timeout: 320000,
+      body: JSON.stringify({
+        prompt,
+        size,
+        count,
+        imageSize: '2K',
+        template_version: 'single-jlc-v1',
+        reference_image: aiImageReference?.dataUrl || undefined,
+      }),
+    });
+    if (response?.code !== 200) return Toast.show(response?.msg || '生成失败', 'error');
+    Toast.show(response.msg || '生成完成', 'success');
+    await loadAIGenerationHistory();
+    loadAIPointBalance();
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = '<i data-lucide="wand-sparkles"></i> 开始生成';
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+}
+
 async function generateAISuite() {
   const prompt = document.getElementById('aiSuitePrompt')?.value.trim();
   const modules = selectedAISuiteModules();
   const size = document.getElementById('aiSuiteSize')?.value || '1024x1360';
-  const provider = 'jlc';
-  const ratio = size === '1024x1360' || size === '1024x1365' ? '3:4' : size === '1024x1536' ? '2:3' : '1:1';
+    const ratio = size === '1024x1360' || size === '1024x1365' ? '3:4' : size === '1024x1536' ? '2:3' : '1:1';
   if (!prompt) return Toast.show('请填写商品卖点与制作要求', 'warning');
   if (!aiSuiteReferences.length) return Toast.show('请至少上传 1 张商品参考图', 'warning');
   if (!modules.length) return Toast.show('请至少选择 1 个套图模块', 'warning');
@@ -257,8 +290,7 @@ async function generateAISuite() {
     if (progress) progress.textContent = `${completed} / ${modules.length} 已完成 · 正在生成 ${item.module.name}`;
     renderAISuiteResults();
     const generationPrompt = buildAISuitePrompt(item.module, prompt, ratio, item.modulePlan); item.generationPrompt = generationPrompt;
-    const response = provider === 'jlc'
-      ? await Api.request('/api/ai/suite/jlc', {
+    const response = await Api.request('/api/ai/suite/jlc', {
           method: 'POST',
           timeout: 320000,
           body: JSON.stringify({
@@ -268,8 +300,7 @@ async function generateAISuite() {
             moduleKey: item.module.key,
             images: aiSuiteReferences.map(ref => ref.url || ref.dataUrl).filter(Boolean),
           }),
-        })
-      : await Api.generateAIImages({provider, model, prompt:generationPrompt, size, count:1, template_version:`suite-v4-model-layout-${item.module.key}`, reference_image:aiSuiteReferences[0]?.dataUrl, reference_images:['apiyi_banana','apiyi'].includes(provider) ? aiSuiteReferences.map(ref => ref.dataUrl) : undefined});
+        });
     if (response?.code === 200 && response.data?.assets?.[0]) {
       item.rawAsset = response.data.assets[0];
       item.asset = item.rawAsset; item.status = 'done'; completed++;
@@ -278,20 +309,18 @@ async function generateAISuite() {
     if (progress) progress.textContent = `${completed} / ${modules.length} 已完成`;
     renderAISuiteResults();
   }
+  loadAIPointBalance();
   btn.disabled = false; Toast.show(completed === modules.length ? 'Ozon 套图已全部生成' : `已完成 ${completed} / ${modules.length} 张，请重试失败项`, completed === modules.length ? 'success' : 'warning');
 }
 
 async function retryAISuiteItem(index) {
   const item = aiSuiteResults[index]; if (!item) return;
-  const prompt = document.getElementById('aiSuitePrompt')?.value.trim(); const size = document.getElementById('aiSuiteSize')?.value || '1024x1360'; const provider = document.getElementById('aiSuiteProvider')?.value || 'apiyi_banana'; const ratio = size === '1024x1360' || size === '1024x1365' ? '3:4' : size === '1024x1536' ? '2:3' : '1:1';
+  const prompt = document.getElementById('aiSuitePrompt')?.value.trim(); const size = document.getElementById('aiSuiteSize')?.value || '1024x1360'; const ratio = size === '1024x1360' || size === '1024x1365' ? '3:4' : size === '1024x1536' ? '2:3' : '1:1';
   item.status = 'running'; renderAISuiteResults();
-  const retryModel = provider === 'apiyi_banana' ? 'gemini-3-pro-image-preview' : provider === 'yyds' ? 'gpt-image-2-cf' : provider === 'lingkeai' ? document.getElementById('aiSuiteModel')?.value.trim() : 'gpt-image-2.5-all';
-  if (provider === 'lingkeai' && !retryModel) { item.status = 'error'; item.error = '请先填写凌科 AI 的 Model ID'; renderAISuiteResults(); return; }
   const modulePlan = item.modulePlan || fallbackAISuitePlan(item.module, prompt);
   item.modulePlan = modulePlan;
   const generationPrompt = buildAISuitePrompt(item.module, prompt, ratio, modulePlan); item.generationPrompt = generationPrompt;
-  const response = provider === 'jlc'
-    ? await Api.request('/api/ai/suite/jlc', {
+  const response = await Api.request('/api/ai/suite/jlc', {
         method: 'POST',
         timeout: 320000,
         body: JSON.stringify({
@@ -301,8 +330,7 @@ async function retryAISuiteItem(index) {
           moduleKey: item.module.key,
           images: aiSuiteReferences.map(ref => ref.url || ref.dataUrl).filter(Boolean),
         }),
-      })
-    : await Api.generateAIImages({provider, model:retryModel, prompt:generationPrompt, size, count:1, template_version:`suite-v4-model-layout-${item.module.key}`, reference_image:aiSuiteReferences[0]?.dataUrl, reference_images:['apiyi_banana','apiyi'].includes(provider) ? aiSuiteReferences.map(ref => ref.dataUrl) : undefined});
+      });
   if (response?.code === 200 && response.data?.assets?.[0]) {
     item.rawAsset = response.data.assets[0];
     item.asset = item.rawAsset; item.status='done'; item.error='';
@@ -327,8 +355,31 @@ function selectAIImageReference(file){
 }
 function clearAIImageReference(){aiImageReference=null;const box=document.getElementById('aiImageReferenceBox');if(box)box.innerHTML='<button type="button" class="btn btn-sm btn-ghost" onclick="document.getElementById(\'aiImageReferenceInput\').click()"><i data-lucide="upload"></i> 上传商品参考图</button><span>用于保留商品外观并重新设计背景与构图</span>';if(window.lucide)lucide.createIcons();}
 function showImageModelStatus(response) { const el=document.getElementById('aiImageModelState');if(!el)return;const ok=response?.code===200&&response.data?.has_key;el.classList.toggle('ready',ok);el.innerHTML=`<span class="state-dot"></span><span>${ok?`${escapeHtml(response.data.name||response.data.provider)} 已配置`:'未配置图片 API，请前往模型管理'}</span>`; }
+async function loadAIPointBalance() {
+  const el = document.getElementById('aiPointBalance');
+  if (!el) return;
+  try {
+    const response = await Api.getUserInfo();
+    if (!response?.data?.isLoggedIn) { el.textContent = '剩余点数 --'; return; }
+    const user = response.data.user || {};
+    if (user.imageAdminExempt) {
+      el.textContent = '剩余点数：管理员不限';
+      el.title = '管理员账号不受生图点数限制';
+      el.style.color = '#475467';
+      return;
+    }
+    const balance = Number(user.imageBalance || 0);
+    const price = Number(user.imagePricePoints || 0);
+    const enabled = user.imageEnabled !== false;
+    el.textContent = `剩余点数 ${balance.toFixed(2)} 点`;
+    el.title = `生图点数，1 点 = 1 元${price > 0 ? `；每张约 ${price} 点` : ''}`;
+    el.style.color = enabled && balance > 0 ? '#475467' : '#dc2626';
+  } catch (error) {
+    el.textContent = '剩余点数 --';
+  }
+}
+
 async function loadAIGenerationHistory(){const r=await Api.getGallery({source:'ai'});const items=r?.code===200?(r.data?.list||[]):[];galleryAssets=items;renderGalleryGrid('aiImageResults',items);}
-let pixpixConnected = false;
 async function loadAISuiteProducts() {
   const select = document.getElementById('aiSuiteProductSelect');
   if (!select) return;

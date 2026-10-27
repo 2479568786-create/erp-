@@ -57,17 +57,7 @@ async function triggerFinanceSync() {
   if (btn) { btn.disabled = true; btn.innerHTML = '同步中...'; }
   try {
     const resp = await API.post('/api/finance/sync', {});
-    // 不能写死 success：全店失败时必须显示为错误，否则「成功 0 店」配绿勾自相矛盾
-    if (window.Toast) {
-      const code = resp && resp.code;
-      const msg = (resp && resp.msg) || '财务明细同步完成';
-      const d = (resp && resp.data) || {};
-      const ok = Number(d.ok || 0);
-      const failed = Number(d.failed || 0);
-      if (code !== 200 || (failed > 0 && ok === 0)) Toast.show(msg, 'error');
-      else if (failed > 0) Toast.show(msg, 'warning');
-      else Toast.show(msg, 'success');
-    }
+    window.Toast && Toast.show(resp.msg || '财务明细同步完成', 'success');
   } catch (e) {
     window.Toast && Toast.show('同步失败: ' + (e.message || e), 'error');
   } finally {

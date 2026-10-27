@@ -746,6 +746,18 @@ let _usersCache = [];
 function _userRoleText(r) { return USER_ROLE_TEXT[r] || r || '-'; }
 function _findUser(uid) { return _usersCache.find(u => u.id === uid); }
 
+/** 用户管理表格里的「生图余额」单元格（1 点 = 1 元；余额≤0 或已停用都会拦截生图） */
+function _userImageBalanceCell(u) {
+  if (u.imageAdminExempt) {
+    return '<span style="color:var(--text-tertiary);font-size:12px;">管理员不限</span>';
+  }
+  const balance = Number(u.imageBalance || 0);
+  const color = balance > 0 ? '#16a34a' : '#dc2626';
+  const disabled = u.imageEnabled === false
+    ? '<div style="color:#dc2626;font-size:12px;">生图已停用</div>' : '';
+  return `<strong style="color:${color};">${balance.toFixed(2)}</strong> <span style="color:var(--text-tertiary);font-size:12px;">点</span>${disabled}`;
+}
+
 /** 拉取用户列表 */
 async function loadUsers() {
   const res = await API.get('/api/users');
@@ -772,17 +784,19 @@ async function showUserManager() {
       <td>${u.nickname || '-'}</td>
       <td>${_userRoleText(u.role)}</td>
       <td>${u.status === 'disabled' ? '<span style="color:#dc2626;">禁用</span>' : '<span style="color:#16a34a;">启用</span>'}</td>
+      <td>${_userImageBalanceCell(u)}</td>
       <td>${u.storeCount ?? 0}</td>
       <td>
         ${me && u.id === me.id
           ? '<span style="color:var(--text-tertiary);font-size:12px;">当前账号不可操作</span>'
           : `
+        <button class="btn btn-xs" onclick="openUserTopupDialog(${u.id})">加点数</button>
         <button class="btn btn-xs" onclick="openUserStoreBindDialog(${u.id})">绑定店铺</button>
         <button class="btn btn-xs" onclick="openEditUserDialog(${u.id})">编辑</button>
         <button class="btn btn-xs" style="color:var(--danger);" onclick="deleteUser(${u.id})">删除</button>`}
       </td>
     </tr>
-  `).join('') : '<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text-tertiary);">暂无账号</td></tr>';
+  `).join('') : '<tr><td colspan="7" style="text-align:center;padding:30px;color:var(--text-tertiary);">暂无账号</td></tr>';
 
   Modal.show({
     title: '用户管理',
@@ -797,6 +811,7 @@ async function showUserManager() {
               <th>昵称</th>
               <th>角色</th>
               <th>状态</th>
+              <th>生图余额</th>
               <th>店铺数</th>
               <th>操作</th>
             </tr>
@@ -807,6 +822,7 @@ async function showUserManager() {
     `,
     footer: [
       { text: '新建账号', class: 'btn-primary', onClick: () => openCreateUserDialog() },
+      { text: '充值流水', class: 'btn-secondary', onClick: () => showUserTopupLog() },
       { text: '关闭', class: 'btn-ghost', onClick: () => Modal.close() },
     ],
     onOpen: () => { if (window.lucide) lucide.createIcons(); },
@@ -912,6 +928,85 @@ async function submitEditUser(uid) {
   } else {
     Toast.show(res.msg || '保存失败', 'error');
   }
+}
+
+/** 给账号加点数（充值）弹窗 */
+function openUserTopupDialog(uid) {
+  if (!_storeIsAdmin()) { Toast.show('仅管理员可操作', 'warning'); return; }
+  const u = _findUser(uid);
+  if (!u) return;
+  const current = Number(u.imageBalance || 0).toFixed(2);
+  const price = Number(u.imagePricePoints || 0);
+  Modal.show({
+    title: `加点数 - ${u.username}`,
+    size: 'md',
+    body: `
+      <p style="font-size:13px;color:var(--text-tertiary);margin-bottom:12px;">
+        当前生图余额：<strong>${current} 点</strong>（1 点 = 1 元${price > 0 ? `，约合 ${Math.floor(Number(current) / price)} 张图` : ''}）。充值后立即到账，并记一条充值流水。
+      </p>
+      <div class="form-group">
+        <label class="form-label">加点数（点） <span class="required">*</span></label>
+        <input type="number" class="form-input" id="utPoints" min="0.01" step="0.01" placeholder="例如 10">
+      </div>
+      <div class="form-group">
+        <label class="form-label">备注（可选）</label>
+        <input type="text" class="form-input" id="utReason" placeholder="例如 微信转账 10 元" maxlength="100">
+      </div>
+    `,
+    footer: [
+      { text: '取消', class: 'btn-ghost', onClick: () => Modal.close() },
+      { text: '确认充值', class: 'btn-primary', onClick: () => submitUserTopup(u.id) },
+    ],
+  });
+}
+
+/** 提交加点数 */
+async function submitUserTopup(uid) {
+  const points = Number(document.getElementById('utPoints').value);
+  if (!Number.isFinite(points) || points <= 0) { Toast.show('请输入大于 0 的点数', 'warning'); return; }
+  const reason = document.getElementById('utReason').value.trim();
+  const res = await API.post('/api/image-billing/accounts/' + uid + '/topup', { points, reason });
+  if (res.code === 200) {
+    await _closeAllModals();
+    Toast.show(res.msg || '充值成功', 'success');
+    showUserManager();
+  } else {
+    Toast.show(res.msg || '充值失败', 'error');
+  }
+}
+
+/** 充值流水（对账用） */
+async function showUserTopupLog() {
+  const res = await API.get('/api/image-billing/topups?limit=100');
+  const rows = (res && res.code === 200 && res.data) ? (res.data.list || []) : [];
+  const usernames = {};
+  _usersCache.forEach(u => { usernames[u.id] = u.username; });
+  const body = rows.length ? rows.map(r => `
+    <tr>
+      <td>${r.created_at || '-'}</td>
+      <td>${usernames[r.account_id] || ('#' + r.account_id)}</td>
+      <td style="color:#16a34a;font-weight:600;">+${Number(r.points || 0).toFixed(2)}</td>
+      <td>${r.balance_after == null ? '-' : Number(r.balance_after).toFixed(2)}</td>
+      <td>${r.operator || '-'}</td>
+      <td>${r.reason || '-'}</td>
+    </tr>`).join('')
+    : '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-tertiary);">暂无充值记录</td></tr>';
+  Modal.show({
+    title: '充值流水',
+    size: 'lg',
+    body: `
+      <p style="font-size:13px;color:var(--text-tertiary);margin-bottom:12px;">最近 100 条「加点数」记录，用于和外部台账对账（1 点 = 1 元）。</p>
+      <div style="overflow:auto;max-height:420px;">
+        <table class="collect-table" style="width:100%;font-size:13px;">
+          <thead>
+            <tr><th>时间</th><th>账号</th><th>加点数</th><th>充值后余额</th><th>操作人</th><th>备注</th></tr>
+          </thead>
+          <tbody>${body}</tbody>
+        </table>
+      </div>
+    `,
+    footer: [{ text: '关闭', class: 'btn-ghost', onClick: () => Modal.close() }],
+  });
 }
 
 /** 删除账号（其名下店铺自动解绑为公共店铺） */

@@ -9,6 +9,8 @@ venv/
 
 # 数据文件（运行时生成）
 backend/data/*.json
+# 例外：脱敏后的模型配置模板可入库（api_key 必须为空）
+!backend/data/ai_models.example.json
 backend/data/cache/
 backend/data/cache_tmp/
 backend/data/backup_*/

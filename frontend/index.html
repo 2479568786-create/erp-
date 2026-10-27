@@ -67,13 +67,10 @@
   </script>
   <script async src="https://cdn.tailwindcss.com"></script>
 
-  <!-- Outfit 字体（TailAdmin 默认字体） -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@100..900&display=swap" rel="stylesheet">
+  <!-- Use system fonts so a blocked font CDN cannot delay first paint. -->
 
   <!-- Lucide Icons CDN -->
-  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+  <script async src="https://unpkg.com/lucide@latest/dist/umd/lucide.js" onload="if (window.lucide) lucide.createIcons()"></script>
 
   <!-- ERP 原有样式（保留供 ERP 业务组件用） -->
   <link rel="stylesheet" href="css/variables.css">
@@ -81,7 +78,6 @@
   <link rel="stylesheet" href="css/layout.css">
   <link rel="stylesheet" href="css/components.css">
   <link rel="stylesheet" href="css/pages.css">
-  <link rel="stylesheet" href="css/shangdekuai.css">
 
   <style>
     /* TailAdmin @utility 自定义类（Play CDN 不支持 @utility，纯 CSS 实现） */
@@ -152,7 +148,7 @@
 
     /* ERP 路由容器 */
     #pageContainer { min-height: calc(100vh - 80px); }
-    body { font-family: 'Outfit', sans-serif; }
+    body { font-family: 'Outfit', system-ui, sans-serif; }
 
     /* ===== 覆盖 layout.css 中 sidebar 旧样式（旧版 position:fixed + .nav-item 旧样式，新版 flex + Tailwind） ===== */
     #sidebar {
@@ -464,11 +460,10 @@
         <span class="menu-text">首页</span>
       </a>
 
-      <a class="nav-item menu-item menu-item-inactive" href="#/shangdekuai" data-page="shangdekuai" title="上得快">
-        <span class="menu-item-icon menu-item-icon-inactive">
-          <i data-lucide="rocket" style="width:20px;height:20px;"></i>
-        </span>
-        <span class="menu-text">上得快</span>
+
+      <a class="nav-item menu-item menu-item-inactive" href="#/jlc-workspace" data-page="jlc-workspace" title="JLC 上架研究">
+        <span class="menu-item-icon menu-item-icon-inactive"><i data-lucide="flask-conical" style="width:20px;height:20px;"></i></span>
+        <span class="menu-text">JLC 上架研究</span>
       </a>
 
       <!-- 公共通知 -->
@@ -655,6 +650,10 @@
             <i data-lucide="images" style="width:18px;height:18px;"></i>
             <span class="menu-text">我的图库</span>
           </a>
+          <a class="nav-item menu-dropdown-item menu-dropdown-item-inactive" href="#/watermark" data-page="watermark" title="水印管理">
+            <i data-lucide="stamp" style="width:18px;height:18px;"></i>
+            <span class="menu-text">水印管理</span>
+          </a>
         </div>
       </div>
 
@@ -791,7 +790,7 @@
 <div class="toast-container fixed top-20 right-4 z-[9999] flex flex-col gap-2" id="toastContainer"></div>
 
 <!-- JavaScript 文件（按依赖顺序） -->
-<script src="js/api.js"></script>
+<script src="js/api.js?v=20261027"></script>
 <script src="js/store.js"></script>
 <script src="js/router.js"></script>
 <!-- 组件模块 -->
@@ -808,20 +807,21 @@
 <!-- 页面逻辑 -->
 <script src="js/pages/home.js"></script>
 <script src="js/pages/public-notifications.js"></script>
-<script src="js/pages/collect.js"></script>
+<script src="js/pages/collect.js?v=20261028f"></script>
 <script src="js/pages/ai-write.js"></script>
 <script src="js/pages/publish.js"></script>
 <script src="js/pages/store.js"></script>
 <script src="js/pages/online-products.js"></script>
 <script src="js/pages/model.js"></script>
 <script src="js/pages/calculator.js"></script>
-<script src="js/pages/media.js"></script>
-<script src="js/pages/shangdekuai.js"></script>
+<script src="js/pages/media.js?v=20261028a"></script>
+<script src="js/pages/watermark.js"></script>
+<script src="js/pages/jlc-workspace.js"></script>
 <script src="js/pages/orders.js"></script>
 <script src="js/pages/research.js"></script>
 <script src="js/pages/insights.js"></script>
 <script src="js/pages/seller-insights.js"></script>
-<script src="js/pages/ad-monitor.js"></script>
+<script src="js/pages/ad-monitor.js?v=20261027f"></script>
 <script src="js/pages/promo-remove.js"></script>
 <script src="js/pages/dashboard-control.js"></script>
 <script src="js/pages/finance-center.js"></script>

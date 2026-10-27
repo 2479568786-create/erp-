@@ -410,6 +410,7 @@ const AdMonitorPage = (() => {
             <th style="text-align:left;">展示位置</th>
             <th style="text-align:left;">状态</th>
             <th style="text-align:right;">日预算</th>
+            <th style="text-align:right;">操作</th>
           </tr></thead>
           <tbody>
             ${list.map(c => `
@@ -420,10 +421,184 @@ const AdMonitorPage = (() => {
                 <td>${esc(c.placementText)}</td>
                 <td>${esc(stateText[c.state] || c.state)}</td>
                 <td style="text-align:right;">${esc(c.dailyBudget || '-')}</td>
+                <td style="text-align:right;white-space:nowrap;">
+                  <button class="btn btn-ghost btn-sm" data-action="budget" data-campaign="${esc(c.campaignId)}" data-store="${c.storePk}" data-title="${esc(c.title || '')}" data-budget="${esc(c.dailyBudget || '')}">调预算</button>
+                  <button class="btn btn-ghost btn-sm" data-action="bids" data-campaign="${esc(c.campaignId)}" data-store="${c.storePk}" data-title="${esc(c.title || '')}">调出价</button>
+                </td>
               </tr>`).join('')}
           </tbody>
         </table>
       </div>`;
+
+    // 事件委托：用 data-* 传参，避免把 Ozon 活动标题拼进 onclick 造成转义问题
+    box.querySelectorAll('button[data-action]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const campaign = {
+          campaignId: btn.dataset.campaign,
+          storePk: Number(btn.dataset.store),
+          title: btn.dataset.title,
+          dailyBudget: btn.dataset.budget,
+        };
+        if (btn.dataset.action === 'budget') openBudgetEditor(campaign);
+        else openBidsEditor(campaign);
+      });
+    });
+  }
+
+  // ======================= 写操作：调预算 / 调出价 =======================
+  // 后端护栏：先 preview 再 apply、apply 需要 confirm=true、仅管理员、写操作全部落 ad_ops_log。
+
+  function openBudgetEditor(c) {
+    Modal.show({
+      title: '调整日预算 · ' + (c.title || c.campaignId),
+      size: 'md',
+      body: `
+        <div style="font-size:13px;color:#475467;margin-bottom:12px;">
+          当前日预算：<strong>${esc(c.dailyBudget || '未限制')}</strong>
+        </div>
+        <div class="form-group">
+          <label class="form-label">新的日预算（₽）<span class="required">*</span></label>
+          <input class="form-input" id="amBudgetRub" type="number" min="100" step="10" placeholder="例如 600">
+          <p style="font-size:12px;color:#98a2b3;margin:6px 0 0;">
+            新预算范围 100–100000 ₽，单次变动幅度不得超过 100%。提交前请先点「预演」。
+          </p>
+        </div>
+        <div id="amBudgetResult" style="font-size:12px;color:#475467;"></div>`,
+      footer: [
+        { text: '取消', class: 'btn-ghost', onClick: () => Modal.close() },
+        { text: '预演', class: 'btn-ghost', onClick: () => previewBudget(c) },
+        { text: '确认提交', class: 'btn-primary', onClick: () => applyBudget(c) },
+      ],
+    });
+  }
+
+  function _budgetInputValue() {
+    const input = document.getElementById('amBudgetRub');
+    return input ? Number(input.value) : 0;
+  }
+
+  function _renderOpsResult(boxId, d, title) {
+    const box = document.getElementById(boxId);
+    if (!box) return;
+    const ok = !!d.ok;
+    box.innerHTML = `
+      <div style="margin-top:10px;padding:10px 12px;border-radius:8px;
+                  background:${ok ? '#f0fdf4' : '#fef2f2'};border:1px solid ${ok ? '#bbf7d0' : '#fecaca'};">
+        <div style="font-weight:600;color:${ok ? '#166534' : '#b42318'};">${esc(title)}</div>
+        ${(d.errors || []).length ? `<div style="color:#b42318;">${d.errors.map(esc).join('<br>')}</div>` : ''}
+        ${(d.warnings || []).length ? `<div style="color:#b54708;">${d.warnings.map(esc).join('<br>')}</div>` : ''}
+      </div>`;
+  }
+
+  async function previewBudget(c) {
+    const value = _budgetInputValue();
+    if (!value) { Toast.show('请填写新的日预算', 'warning'); return; }
+    const res = await API.post(`/api/ad-monitor/campaigns/${c.campaignId}/budget/preview`,
+                               { storePk: c.storePk, dailyBudgetRub: value });
+    if (!res || res.code !== 200) {
+      _renderOpsResult('amBudgetResult', { ok: false, errors: [(res && res.msg) || '预演失败'] }, '预演失败');
+      return;
+    }
+    const d = res.data || {};
+    const before = (d.before || {}).dailyBudgetRub;
+    const after = (d.changes || {}).dailyBudgetRub;
+    _renderOpsResult('amBudgetResult', d,
+      `预演${d.ok ? '通过' : '未通过'}：${before ?? '-'} ₽ → ${after ?? value} ₽`);
+  }
+
+  async function applyBudget(c) {
+    if (!isAdmin()) { Toast.show('仅管理员可修改预算', 'warning'); return; }
+    const value = _budgetInputValue();
+    if (!value) { Toast.show('请填写新的日预算', 'warning'); return; }
+    const res = await API.post(`/api/ad-monitor/campaigns/${c.campaignId}/budget`,
+                               { storePk: c.storePk, dailyBudgetRub: value, confirm: true });
+    if (res && res.code === 200) {
+      Toast.show(res.msg || '预算已更新', 'success');
+      await Modal.close();
+      await refresh();
+      await paintCampaigns();
+    } else {
+      _renderOpsResult('amBudgetResult', { ok: false, errors: [(res && res.msg) || '提交失败'] }, '提交失败');
+    }
+  }
+
+  async function openBidsEditor(c) {
+    const res = await API.get(`/api/ad-monitor/campaigns/${c.campaignId}/products?storePk=${c.storePk}`);
+    if (!res || res.code !== 200) { Toast.show((res && res.msg) || '读取商品失败', 'error'); return; }
+    const products = (res.data && res.data.products) || [];
+    if (!products.length) { Toast.show('该活动下没有商品', 'warning'); return; }
+    Modal.show({
+      title: '调整出价 · ' + (c.title || c.campaignId),
+      size: 'lg',
+      body: `
+        <p style="font-size:12px;color:#98a2b3;margin:0 0 8px;">
+          只填要改的行，留空表示不变；单次变动 ≤100%，出价 1–5000 ₽。提交前先点「预演」。
+        </p>
+        <div style="max-height:420px;overflow:auto;border:1px solid #e4e7ec;border-radius:8px;">
+          <table style="width:100%;font-size:12px;">
+            <thead><tr>
+              <th style="text-align:left;padding:8px;">SKU</th>
+              <th style="text-align:left;">商品</th>
+              <th style="text-align:right;">当前出价 ₽</th>
+              <th style="text-align:right;padding:8px;">新出价 ₽</th>
+            </tr></thead>
+            <tbody>${products.map(p => `<tr>
+              <td style="padding:6px 8px;">${esc(p.sku)}</td>
+              <td style="max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(p.title || '-')}</td>
+              <td style="text-align:right;">${esc(String(p.bidRub))}</td>
+              <td style="text-align:right;padding:4px 8px;">
+                <input class="form-input" type="number" step="0.5" min="1" data-sku="${esc(p.sku)}" style="width:96px;" placeholder="${esc(String(p.bidRub))}">
+              </td>
+            </tr>`).join('')}</tbody>
+          </table>
+        </div>
+        <div id="amBidsResult" style="font-size:12px;color:#475467;margin-top:10px;"></div>`,
+      footer: [
+        { text: '取消', class: 'btn-ghost', onClick: () => Modal.close() },
+        { text: '预演', class: 'btn-ghost', onClick: () => previewBids(c) },
+        { text: '确认提交', class: 'btn-primary', onClick: () => applyBids(c) },
+      ],
+    });
+  }
+
+  function _collectBidChanges() {
+    const out = [];
+    document.querySelectorAll('input[data-sku]').forEach(input => {
+      const value = Number(input.value);
+      if (value > 0) out.push({ sku: input.getAttribute('data-sku'), bidRub: value });
+    });
+    return out;
+  }
+
+  async function previewBids(c) {
+    const bids = _collectBidChanges();
+    if (!bids.length) { Toast.show('请至少填写一个要调整的出价', 'warning'); return; }
+    const res = await API.post(`/api/ad-monitor/campaigns/${c.campaignId}/bids/preview`,
+                               { storePk: c.storePk, bids });
+    if (!res || res.code !== 200) {
+      _renderOpsResult('amBidsResult', { ok: false, errors: [(res && res.msg) || '预演失败'] }, '预演失败');
+      return;
+    }
+    const d = res.data || {};
+    const changed = (d.changed || []).map(x => `SKU ${x.sku}：${x.currentBidRub} → ${x.newBidRub} ₽（${x.deltaPercent}%）`);
+    _renderOpsResult('amBidsResult', d, `预演${d.ok ? '通过' : '未通过'}：${changed.length} 个商品将变更`);
+    const box = document.getElementById('amBidsResult');
+    if (box && changed.length) box.insertAdjacentHTML('beforeend', `<div>${changed.map(esc).join('<br>')}</div>`);
+  }
+
+  async function applyBids(c) {
+    if (!isAdmin()) { Toast.show('仅管理员可修改出价', 'warning'); return; }
+    const bids = _collectBidChanges();
+    if (!bids.length) { Toast.show('请至少填写一个要调整的出价', 'warning'); return; }
+    const res = await API.post(`/api/ad-monitor/campaigns/${c.campaignId}/bids`,
+                               { storePk: c.storePk, bids, confirm: true });
+    if (res && res.code === 200) {
+      Toast.show(res.msg || '出价已更新', 'success');
+      await Modal.close();
+      await paintCampaigns();
+    } else {
+      _renderOpsResult('amBidsResult', { ok: false, errors: [(res && res.msg) || '提交失败'] }, '提交失败');
+    }
   }
 
   // ======================= Tab 4：授权状态 =======================

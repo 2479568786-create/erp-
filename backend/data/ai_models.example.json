@@ -1,0 +1,67 @@
+{
+  "active_provider": "deepseek",
+  "providers": {
+    "deepseek": {
+      "name": "DeepSeek",
+      "api_key": "",
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "enabled": true,
+      "description": "深度求索 - 性价比高，中文理解强"
+    },
+    "qwen": {
+      "name": "通义千问",
+      "api_key": "",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "model": "qwen-plus",
+      "enabled": true,
+      "description": "阿里云通义千问 - 阿里旗下大模型"
+    },
+    "openai": {
+      "name": "OpenAI",
+      "api_key": "",
+      "base_url": "https://api.openai.com/v1",
+      "model": "gpt-4o-mini",
+      "enabled": false,
+      "description": "OpenAI GPT 系列 - 需要海外网络"
+    },
+    "custom": {
+      "name": "自定义",
+      "api_key": "",
+      "base_url": "",
+      "model": "",
+      "enabled": false,
+      "description": "任何 OpenAI 兼容接口"
+    },
+    "yandexgpt": {
+      "name": "YandexGPT",
+      "api_key": "",
+      "base_url": "https://ai.api.cloud.yandex.net/foundationModels/v1",
+      "model": "gpt://b1g4fd2oie4j24c3oehb/yandexgpt-lite",
+      "enabled": true,
+      "description": "Yandex AI Studio - 适合俄语电商文案"
+    },
+    "lingkeai": {
+      "name": "作图",
+      "api_key": "",
+      "base_url": "https://api.lk888.ai/v1",
+      "model": "banana-2.1",
+      "enabled": true,
+      "description": "凌科 AI 生图（banana-2.1，/v1/media 异步协议）"
+    },
+    "shangdekuai_lingke": {
+      "name": "上得快 · 凌科 AI（文本）",
+      "api_key": "",
+      "base_url": "https://api.lk888.ai/v1",
+      "model": "qwen3.7-plus",
+      "enabled": true,
+      "description": "仅供上得快整理事实和类目必填属性；与 ERP 图片及现有文本模型配置隔离"
+    }
+  },
+  "updated_at": "2026-10-28T00:32:35.032782",
+  "image_billing": {
+    "price_points_per_image": 0.37,
+    "currency": "CNY",
+    "updated_at": "2026-10-28 00:32:35"
+  }
+}

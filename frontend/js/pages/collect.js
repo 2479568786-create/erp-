@@ -93,8 +93,8 @@ function proxyImage(url) {
   if (url.startsWith('/uploads/')) return url;
   try {
     const parsed = new URL(url, location.origin);
-    if (parsed.pathname.startsWith('/uploads/') &&
-        (parsed.origin === location.origin || ['localhost', '127.0.0.1'].includes(parsed.hostname))) {
+    // 任意 host 的 /uploads/ 托管图都归一为本站相对路径（含历史旧 IP:5000 链接）
+    if (parsed.pathname.startsWith('/uploads/')) {
       return parsed.pathname;
     }
   } catch (_) { /* 外部图片继续走代理 */ }
@@ -343,6 +343,7 @@ function renderTable() {
           <button class="action-link" onclick="aiOptimize('${p.id}')" title="AI优化">AI优化</button>
           <button class="action-link" onclick="editProduct('${p.id}')" title="编辑">编辑</button>
           <button class="action-link" onclick="publishProduct('${p.id}')" title="发布">发布</button>
+          <button class="action-link jlc" onclick="sendToJlc('${p.id}')" title="送 JLC 工作区跑 15 步流水线上架">送JLC生产</button>
           <button class="action-link" onclick="multiStorePublish('${p.id}')" title="多店铺同时上架">多店上架</button>
           <button class="action-link danger" onclick="deleteProduct('${p.id}')" title="删除">删除</button>
           <button class="action-link note-action" onclick="addNote('${p.id}')" title="备注">备注</button>
@@ -745,6 +746,7 @@ async function editProduct(id, opts = {}) {
   // 编辑会话 ID，用于异步回调判断是否仍是当前会话（防止旧会话污染新会话）
   const editSessionId = `${id}_${Date.now()}`;
   window._editSessionId = editSessionId;
+  _editImageUploadErrors.clear();
   console.log('[editProduct] SKU数据加载:', {
     'product.skuAttrs': product.skuAttrs?.length || 0,
     'product.skus': product.skus?.length || 0,
@@ -801,9 +803,9 @@ async function editProduct(id, opts = {}) {
       ${opts.editorMode === 'online' ? `
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;padding:10px 14px;background:#F0FDF4;border:1px solid #BBF7D0;border-radius:10px;">
         <div style="font-size:13px;color:#166534;line-height:1.5;">
-          <strong>老链接新上：</strong>以当前 Ozon 商品为底，在采集箱创建一条新记录，可再次发布到任意店铺。
+          <strong>跨店铺 AI 重制：</strong>先创建目标店铺副本，再用 AI 整套改图、生成商品卡，完成后保存并发布。原在线商品不变。
         </div>
-        <button type="button" class="jx-button jx-button--primary jx-button--small" style="flex-shrink:0;white-space:nowrap;" onclick="cloneOnlineProductAsNewLink(window._editingProduct)">创建新记录</button>
+        <button type="button" class="jx-button jx-button--primary jx-button--small" style="flex-shrink:0;white-space:nowrap;" onclick="relistOnlineEditorProduct()">创建重制副本</button>
       </div>` : ''}
       <div class="edit-product-layout${!window._selectedCategory ? ' cat-step-pending' : ''}">
         <!-- 左侧：产品列表 -->
@@ -1257,7 +1259,7 @@ async function editProduct(id, opts = {}) {
                 <div class="jx-form-item__label"><span>货源链接</span></div>
                 <div class="jx-form-item__content">
                   <div class="source-link-info-box" id="sourceLinksList">
-                    ${(product.sourceLinks || [{ remark: '', url: '' }]).map((sl, idx) => `
+                    ${(product.sourceLinks?.length ? product.sourceLinks : [{ remark: '', url: '' }]).map((sl, idx) => `
                     <div class="jx-form-item asterisk-left jx-form-item--label-top pro-form-item source-link-row" sourceindex="${idx}" data-idx="${idx}">
                       <div class="jx-form-item__content">
                         <div class="pro-input-group source-input-group">
@@ -3531,7 +3533,13 @@ function renderSkuImageList(skuIndex, images) {
   const showSize = document.getElementById('showImageSize')?.checked !== false;
   const thumbSize = showLarge ? 'large' : 'small';
 
-  let html = '<div class="sku-image-gallery">';
+  let html = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+      <button type="button" class="btn btn-sm btn-secondary" onclick="openSkuImageEdit(${skuIndex})"><i data-lucide="wand-sparkles" style="width:14px;height:14px;"></i> AI整套改图</button>
+<button type="button" class="btn btn-sm btn-primary" onclick="openSkuReferenceSuite(${skuIndex})"><i data-lucide="images" style="width:14px;height:14px;"></i> AI参考图生成套图</button>
+      <span style="font-size:12px;color:var(--text-tertiary);">按当前 SKU 原图逐张生成预览，审核后再替换</span>
+    </div>
+    <div class="sku-image-gallery">`;
 
   images.forEach((url, imgIndex) => {
     const isMain = imgIndex === 0;
@@ -3543,7 +3551,6 @@ function renderSkuImageList(skuIndex, images) {
         </div>
         <div class="card-dimensions">1200 x 1600</div>
         <div class="card-actions">
-          <button class="card-action-btn" title="AI优化" onclick="event.stopPropagation();"><i data-lucide="sparkles" style="width:13px;height:13px;"></i> AI</button>
           <button class="card-action-btn" title="编辑" onclick="event.stopPropagation();"><i data-lucide="pencil" style="width:13px;height:13px;"></i></button>
           <button class="card-action-btn btn-danger" title="删除" onclick="event.stopPropagation();removeSkuImage(${skuIndex}, ${imgIndex})"><i data-lucide="trash-2" style="width:13px;height:13px;"></i></button>
           <button class="card-action-btn" title="信息" onclick="event.stopPropagation();"><i data-lucide="info" style="width:13px;height:13px;"></i></button>
@@ -3586,6 +3593,608 @@ function renderSkuImageList(skuIndex, images) {
 
   return html;
 }
+
+const SKU_IMAGE_EDIT_PROVIDERS = ['lingkeai'];
+const SKU_IMAGE_EDIT_PROMPTS = {
+  distinct: '请基于参考图重新拍摄感地创作一张 Ozon 商品图，不能只换背景或光影：在参考图能够证明的范围内，明显改变相机视角（优先采用约 30–45 度斜侧视角）、商品在画面中的位置、大小和留白布局。商品保持完整清晰。不得推测或绘制参考图看不到的结构、接口、配件，不得改变商品形状、比例、颜色、材质、标识和文字；不得增加文字、品牌或卖点。若无法安全改变视角，只改变构图、取景和场景，不要编造商品细节。保持竖版 3:4、浅色背景和真实电商摄影质感。',
+  balanced: '请基于参考图制作一张新的 Ozon 商品图，保留商品的真实视角与全部结构，不得替换、重塑或补画参考图看不到的部分。除重做背景和光影外，还要明显改变商品在画面中的位置、大小、取景范围和留白布局；不得增加文字、品牌、配件或卖点。保持商品完整清晰、竖版 3:4、浅色背景和真实电商摄影质感。',
+};
+
+async function openSkuImageEdit(skuIndex) {
+  const images = window._skuImages?.[skuIndex] || [];
+  if (!images.length) return Toast.show('当前 SKU 没有可改图的原图', 'warning');
+  if (!window._editSessionId) return Toast.show('请在商品编辑窗口中使用 AI 改图', 'warning');
+
+  const response = await Api.getAIModels();
+  if (response?.code !== 200) return Toast.show(response?.msg || '读取模型配置失败', 'error');
+  const providers = response.data?.providers || {};
+  const available = SKU_IMAGE_EDIT_PROVIDERS
+    .filter(key => providers[key]?.enabled && providers[key]?.has_key && providers[key]?.base_url)
+    .map(key => ({ key, name: providers[key].name || key, model: providers[key].model || '' }));
+  if (!available.length) return Toast.show('模型管理中没有已启用且已配置密钥的图片模型', 'warning');
+
+  const state = {
+    skuIndex,
+    sessionId: window._editSessionId,
+    originals: images.slice(),
+    results: images.map(url => ({ original: url, generated: '', error: '', approved: false })),
+    running: false,
+    cancelRequested: false,
+    providers: available,
+    providerKey: '',
+  };
+  window._skuImageEditState = state;
+  Modal.show({
+    title: 'AI 整套改图预览',
+    size: 'xl',
+    body: `<div id="skuImageEditBody">
+      <p style="color:var(--text-secondary);">当前套图 ${images.length} 张，将逐张使用原图作为参考生成，共调用模型 ${images.length} 次。原图不会在审核前更改。</p>
+      <label class="form-label" for="skuImageEditStrategy">构图策略</label>
+      <select class="form-select" id="skuImageEditStrategy">
+        <option value="distinct" selected>明显重构视角与构图（推荐）</option>
+        <option value="balanced">保守换构图（保留原视角）</option>
+      </select>
+      <label class="form-label" for="skuImageEditProvider">图片模型</label>
+      <select class="form-select" id="skuImageEditProvider">${available.map(item => `<option value="${escapeAttr(item.key)}">${escapeHtml(item.name)}${item.model ? ` · ${escapeHtml(item.model)}` : ''}</option>`).join('')}</select>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;">
+        <button type="button" class="btn btn-ghost" onclick="Modal.close()">取消</button>
+        <button type="button" class="btn btn-primary" onclick="startSkuImageEditGeneration(${skuIndex})">开始生成预览</button>
+      </div>
+    </div>`,
+    beforeClose: () => !state.running,
+    onClose: () => { if (window._skuImageEditState === state) window._skuImageEditState = null; },
+  });
+}
+
+function refImageFetchOptions() {
+  // 参考图走自家 /api/image_proxy：非公开图床需要登录态，浏览器原始 fetch 不会自带 Bearer，
+  // 这里显式带上 token，避免 1688/淘宝图床（alicdn）因 401 导致参考图转换失败。
+  const options = { credentials: 'same-origin' };
+  try {
+    const token = (typeof Store !== 'undefined' && Store?.getToken) ? Store.getToken() : '';
+    if (token) options.headers = { Authorization: 'Bearer ' + token };
+  } catch (_) { /* 忽略 */ }
+  return options;
+}
+
+async function skuImageToDataUrl(url) {
+  const response = await fetch(proxyImage(url), refImageFetchOptions());
+  if (!response.ok) throw new Error(`原图读取失败（HTTP ${response.status}）`);
+  const blob = await response.blob();
+  if (blob.size > 10 * 1024 * 1024) throw new Error('原图超过 10MB，无法作为参考图');
+  if (!/^image\/(png|jpeg|webp)$/.test(blob.type)) throw new Error('参考图仅支持 PNG、JPG 或 WebP');
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('原图读取失败'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function skuImageToReferenceDataUrl(url) {
+  const response = await fetch(proxyImage(url), refImageFetchOptions());
+  if (!response.ok) throw new Error(`参考图读取失败（HTTP ${response.status}），请确认该图仍可访问或改用上传参考图`);
+  const blob = await response.blob();
+  if (blob.size > 10 * 1024 * 1024) throw new Error('参考图超过 10MB');
+  if (!/^image\/(png|jpeg|webp)$/.test(blob.type)) throw new Error('参考图仅支持 PNG、JPG 或 WebP');
+  const bitmap = await createImageBitmap(blob);
+  try {
+    const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.86);
+  } finally { bitmap.close(); }
+}
+
+
+async function startSkuImageEditGeneration(skuIndex) {
+  const state = window._skuImageEditState;
+  if (!state || state.running || state.skuIndex !== skuIndex) return;
+  const providerKey = document.getElementById('skuImageEditProvider')?.value;
+  const provider = state.providers.find(item => item.key === providerKey);
+  if (!provider) return Toast.show('请选择已配置的图片模型', 'warning');
+  if (!provider.model) return Toast.show('该图片模型未设置 Model ID，请先到模型管理配置', 'warning');
+
+  state.providerKey = providerKey;
+  state.strategy = document.getElementById('skuImageEditStrategy')?.value || 'distinct';
+  state.running = true;
+  const body = document.getElementById('skuImageEditBody');
+  if (body) body.innerHTML = `<p id="skuImageEditProgress">准备生成 ${state.originals.length} 张图片...</p><button type="button" class="btn btn-ghost" onclick="cancelSkuImageEditGeneration()">取消剩余任务</button>`;
+  for (let index = 0; index < state.originals.length; index++) {
+    if (state.cancelRequested || window._editSessionId !== state.sessionId) break;
+    const progress = document.getElementById('skuImageEditProgress');
+    if (progress) progress.textContent = `正在生成第 ${index + 1} / ${state.originals.length} 张，请勿关闭编辑窗口...`;
+    try {
+      state.results[index].generated = await generateSkuImageEditCandidate(state, index, provider);
+    } catch (error) {
+      state.results[index].error = error.message || '生成失败';
+    }
+  }
+  state.running = false;
+  state.results.forEach(item => {
+    if (!item.generated && !item.error) item.error = '已取消，原图保留';
+  });
+  renderSkuImageEditReview(state);
+}
+
+async function generateSkuImageEditCandidate(state, index, provider) {
+  const storeId = state.watermarkStoreId || await resolveSkuWatermarkStoreId();
+  if (!storeId) throw new Error('请选择本次图片所属店铺');
+  state.watermarkStoreId = storeId;
+  const reference = await skuImageToDataUrl(state.originals[index]);
+  const result = await Api.generateAIImages({
+    store_id: storeId,
+    provider: provider.key,
+    model: provider.model,
+    prompt: SKU_IMAGE_EDIT_PROMPTS[state.strategy] || SKU_IMAGE_EDIT_PROMPTS.distinct,
+    size: '1024x1360',
+    count: 1,
+    reference_image: reference,
+  });
+  if (result?.code !== 200 || !result.data?.assets?.[0]?.url) throw new Error(result?.msg || '模型未返回图片');
+  if (result.data.watermark_status === 'not_configured') Toast.show('该店铺未配置水印，成品未加印', 'warning');
+  return result.data.assets[0].url;
+}
+
+async function resolveSkuWatermarkStoreId() {
+  const product = window._editingProduct || {};
+  let stores = window._cachedStores || [];
+  if (!stores.length) {
+    const response = await Api.getStores();
+    stores = response?.code === 200 ? (response.data?.list || []) : [];
+    window._cachedStores = stores;
+  }
+  const match = stores.find(store => store.alias === product.store || store.store_id === product.store || String(store.id) === String(product.storeId || product.store_id || ''));
+  if (match) return String(match.id);
+  return selectWatermarkStoreForGeneration('SKU 图片编辑 - 选择店铺');
+}
+
+async function retrySkuImageEdit(index) {
+  const state = window._skuImageEditState;
+  if (!state || state.running || !state.results[index]?.error) return;
+  const provider = state.providers.find(item => item.key === state.providerKey);
+  if (!provider) return Toast.show('请关闭预览后重新选择图片模型', 'warning');
+
+  state.running = true;
+  state.results[index].error = '正在重试...';
+  renderSkuImageEditReview(state);
+  try {
+    state.results[index].generated = await generateSkuImageEditCandidate(state, index, provider);
+    state.results[index].error = '';
+  } catch (error) {
+    state.results[index].error = error.message || '生成失败';
+  } finally {
+    state.running = false;
+    renderSkuImageEditReview(state);
+  }
+}
+
+function cancelSkuImageEditGeneration() {
+  if (window._skuImageEditState) window._skuImageEditState.cancelRequested = true;
+}
+
+function toggleSkuImageEditApproval(index) {
+  const state = window._skuImageEditState;
+  if (!state?.results[index]?.generated) return;
+  state.results[index].approved = !state.results[index].approved;
+  renderSkuImageEditReview(state);
+}
+
+function setAllSkuImageEditApproval(approved) {
+  const state = window._skuImageEditState;
+  if (!state) return;
+  state.results.forEach(item => { item.approved = Boolean(approved && item.generated); });
+  renderSkuImageEditReview(state);
+}
+
+function renderSkuImageEditReview(state) {
+  if (window._skuImageEditState !== state || window._editSessionId !== state.sessionId) return;
+  const body = document.getElementById('skuImageEditBody');
+  if (!body) return;
+  body.innerHTML = `
+    <p style="color:var(--text-secondary);">逐张审核：通过的图片才会替换编辑器草稿；未通过或生成失败的图片继续使用原图。</p>
+    <div style="display:flex;flex-wrap:wrap;gap:12px;">${state.results.map((item, index) => `
+      <div style="width: min(100%, 460px);border:1px solid var(--border-color);border-radius:8px;padding:10px;">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <div><div style="font-size:12px;margin-bottom:5px;">原图 ${index + 1}</div><img src="${escapeAttr(proxyImage(item.original))}" alt="原图 ${index + 1}" style="width:100%;aspect-ratio:3/4;object-fit:contain;background:#f6f6f6;border-radius:5px;"></div>
+          <div><div style="font-size:12px;margin-bottom:5px;">AI 预览</div>${item.generated ? `<img src="${escapeAttr(proxyImage(item.generated))}" alt="AI预览 ${index + 1}" style="width:100%;aspect-ratio:3/4;object-fit:contain;background:#f6f6f6;border-radius:5px;">` : `<div style="aspect-ratio:3/4;display:grid;place-items:center;background:#f6f6f6;color:var(--text-tertiary);font-size:12px;">${escapeHtml(item.error || '未生成')}</div>`}</div>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:8px;font-size:12px;">
+          <span style="color:${item.generated ? (item.approved ? '#16803c' : 'var(--text-secondary)') : '#b45309'};">${item.generated ? (item.approved ? '已审核通过' : '默认保留原图') : escapeHtml(item.error === '后端未连接' ? '与 ERP 的连接中断，原图保留' : item.error)}</span>
+          ${item.generated ? `<button type="button" class="btn btn-sm ${item.approved ? 'btn-ghost' : 'btn-secondary'}" onclick="toggleSkuImageEditApproval(${index})">${item.approved ? '撤销通过' : '通过并替换'}</button>` : (!state.running && item.error && item.error !== '正在重试...' ? `<button type="button" class="btn btn-sm btn-secondary" onclick="retrySkuImageEdit(${index})">仅重试这张</button>` : '')}
+        </div>
+      </div>`).join('')}</div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">
+      <button type="button" class="btn btn-ghost" onclick="setAllSkuImageEditApproval(false)">全部保留原图</button>
+      <button type="button" class="btn btn-secondary" onclick="setAllSkuImageEditApproval(true)">全部通过</button>
+      <button type="button" class="btn btn-primary" onclick="applySkuImageEditApprovals()">应用审核结果（${state.results.filter(item => item.approved).length}）</button>
+    </div>`;
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function applySkuImageEditApprovals() {
+  const state = window._skuImageEditState;
+  if (!state || window._editSessionId !== state.sessionId) return Toast.show('商品编辑会话已变化，请重新打开改图', 'warning');
+  const current = window._skuImages?.[state.skuIndex] || [];
+  if (current.length !== state.originals.length || current.some((url, index) => url !== state.originals[index])) {
+    return Toast.show('原图已变化，未应用审核结果，请重新生成预览', 'warning');
+  }
+  const approvedCount = state.results.filter(item => item.approved && item.generated).length;
+  if (!approvedCount) return Toast.show('请先审核通过至少一张图片', 'warning');
+  window._skuImages[state.skuIndex] = state.results.map(item => item.approved && item.generated ? item.generated : item.original);
+  refreshSkuImageCell(state.skuIndex);
+  updateTotalSkuImageCount();
+  if (window._editingProduct) _draftSaveWithFormSync(window._editingProduct);
+  window._skuImageEditState = null;
+  Modal.close();
+  Toast.show(`已将 ${approvedCount} 张审核通过的图片替换到编辑草稿；提交时仍需点击“更新到 Ozon”`, 'success');
+}
+
+const SKU_REFERENCE_PROMPT_PURPOSES = ['主图', '细节展示', '使用场景', '结构特写', '配件展示', '尺寸比例展示', '多角度展示', '卖点场景展示'];
+async function openSkuReferenceSuite(skuIndex) {
+  const images = window._skuImages?.[skuIndex] || [];
+  if (!images.length) return Toast.show('当前 SKU 没有可用的参考图片', 'warning');
+  if (!window._editSessionId) return Toast.show('请在商品编辑窗口中使用 AI 参考图生成', 'warning');
+  const models = await Api.getAIModels();
+  if (models?.code !== 200) return Toast.show(models?.msg || '读取模型配置失败', 'error');
+  const providers = models.data?.providers || {};
+  const available = SKU_IMAGE_EDIT_PROVIDERS
+    .filter(key => providers[key]?.enabled && providers[key]?.has_key && providers[key]?.base_url)
+    .map(key => ({ key, name: providers[key].name || key, model: providers[key].model || '' }));
+  if (!available.length) return Toast.show('请先在模型管理中启用并配置凌科 AI（LingkeAI）', 'warning');
+  const state = {
+    skuIndex, sessionId: window._editSessionId, originals: images.slice(), selected: new Set(),
+    uploaded: [],
+    mode: 'manual', count: 7, brief: '', prompts: [], results: [], providers: available,
+    providerKey: available[0].key, visualAnalysis: null, visualAnalysisFingerprint: '', visualAnalysisImageCount: 0, running: false, cancelRequested: false,
+  };
+  window._skuReferenceSuiteState = state;
+  Modal.show({
+    title: 'AI参考图生成套图', size: 'xl', body: '<div id="skuReferenceSuiteBody"></div>',
+    beforeClose: () => !state.running,
+    onClose: () => { if (window._skuReferenceSuiteState === state) window._skuReferenceSuiteState = null; },
+  });
+  renderSkuReferenceSuiteSetup(state);
+}
+
+function renderSkuReferenceSuiteSetup(state) {
+  if (window._skuReferenceSuiteState !== state) return;
+  const body = document.getElementById('skuReferenceSuiteBody');
+  if (!body) return;
+  const remaining = Math.max(0, 30 - (window._skuImages?.[state.skuIndex]?.length || 0));
+  const countOptions = [1, 2, 3, 4, 5, 6, 7, 8].map(count =>
+    `<option value="${count}" ${state.count === count ? 'selected' : ''} ${count > remaining ? 'disabled' : ''}>${count} 张</option>`).join('');
+  body.innerHTML = `
+    <div style="display:grid;gap:16px;max-height:72vh;overflow:auto;padding:2px 4px;">
+      <section><b>1. 参考图</b>
+        <div style="display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap;">
+          <button type="button" class="btn btn-sm btn-primary" onclick="document.getElementById('skuRefUploadInput').click()"><i data-lucide="upload"></i> 业务员上传参考图</button>
+          <span style="font-size:12px;color:var(--text-secondary);">或直接勾选下方该商品的采集图（仿照采集图风格）</span>
+        </div>
+        <input id="skuRefUploadInput" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden onchange="addSkuReferenceUploads(this.files)">
+        ${state.uploaded.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:8px;margin-bottom:10px;">${state.uploaded.map((item, index) => `<div style="position:relative;padding:4px;border:2px solid var(--primary-color,#2563EB);border-radius:8px;background:var(--bg-card);"><img src="${escapeAttr(item.dataUrl)}" alt="上传图 ${index + 1}" style="width:100%;aspect-ratio:1;object-fit:contain;background:#f6f6f6;border-radius:5px;"><button type="button" onclick="removeSkuReferenceUpload(${index})" style="position:absolute;top:2px;right:2px;border:none;background:rgba(0,0,0,.55);color:#fff;border-radius:50%;width:18px;height:18px;line-height:1;cursor:pointer;">×</button><span style="font-size:11px;">上传图 ${index + 1}</span></div>`).join('')}</div>` : ''}
+        <p style="color:var(--text-secondary);font-size:12px;">商品采集图已选 ${state.selected.size}/${state.originals.length} 张；上传的 ${state.uploaded.length} 张会一并作为参考图（最多 6 张）。生成固定调用凌科 AI（LingkeAI）。</p>
+        <div style="margin-bottom:8px;"><button type="button" class="btn btn-sm btn-secondary" onclick="toggleAllSkuReferenceImages()">${state.selected.size === state.originals.length ? '取消全选' : '全选图片'}</button></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:8px;">${state.originals.map((url, index) => {
+          const checked = state.selected.has(index);
+          return `<button type="button" onclick="toggleSkuReferenceImage(${index})" style="position:relative;padding:4px;border:2px solid ${checked ? 'var(--primary-color,#2563EB)' : 'var(--border-color)'};border-radius:8px;background:var(--bg-card);cursor:pointer;">
+            <img src="${escapeAttr(proxyImage(url))}" alt="参考图 ${index + 1}" style="width:100%;aspect-ratio:1;object-fit:contain;background:#f6f6f6;border-radius:5px;">
+            <span style="font-size:11px;">${checked ? '✓ 已选' : `图片 ${index + 1}`}</span></button>`;
+        }).join('')}</div>
+      </section>
+      <section><b>2. 提示词方式</b>
+        <label class="form-label" for="skuReferenceBrief">'每张图的提示词（一行一条；只写一条则按张数复制）'</label>
+        <textarea id="skuReferenceBrief" class="form-input" rows="3" placeholder="例如：突出产品真实结构，画面简洁，适合 Ozon 商品页">${escapeHtml(state.brief)}</textarea>
+        <div style="display:flex;gap:12px;align-items:center;margin-top:10px;flex-wrap:wrap;">
+          <label>生成张数 <select id="skuReferenceCount" class="form-select" style="width:auto;display:inline-block;" onchange="updateSkuReferenceControls()">${countOptions}</select></label>
+        </div>
+        ${remaining < 1 ? `<p style="color:#b45309;">当前 SKU 仅剩 ${remaining} 个图片位，无法按所选模式生成，请先整理图片。</p>` : ''}
+      </section>
+      ${state.prompts.length ? `<section><b>3. 提示词预览（${state.prompts.length} 张，可编辑）</b>
+        <div style="display:grid;gap:8px;margin-top:8px;">${state.prompts.map((item, index) => `<div style="border:1px solid var(--border-color);border-radius:8px;padding:10px;">
+          <label class="form-label">${index + 1}. ${escapeHtml(item.purpose || SKU_REFERENCE_PROMPT_PURPOSES[index] || '商品展示')}</label>
+          <textarea class="form-input" rows="3" oninput="updateSkuReferencePrompt(${index},this.value)">${escapeHtml(item.prompt || '')}</textarea></div>`).join('')}</div>
+      </section>` : ''}
+      <div style="display:flex;justify-content:flex-end;gap:8px;position:sticky;bottom:0;background:var(--bg-card);padding:8px 0;">
+        <button type="button" class="btn btn-ghost" onclick="Modal.close()">取消</button>
+        <button type="button" class="btn btn-secondary" onclick="generateSkuReferencePrompts()">${state.prompts.length ? '重新生成提示词' : '生成提示词'}</button>
+        ${state.prompts.length ? `<button type="button" class="btn btn-primary" onclick="startSkuReferenceSuiteGeneration()">开始生成图片</button>` : ''}
+      </div>
+    </div>`;
+  if (window.lucide) window.lucide.createIcons();
+}
+
+async function addSkuReferenceUploads(files) {
+  const state = window._skuReferenceSuiteState;
+  if (!state) return;
+  const list = Array.from(files || []).slice(0, 6 - state.uploaded.length);
+  if (!list.length) return;
+  for (const file of list) {
+    if (file.size > 10 * 1024 * 1024 || !/^image\/(png|jpeg|webp)$/.test(file.type)) {
+      Toast.show(`跳过不支持的图片：${file.name}`, 'warning');
+      continue;
+    }
+    const dataUrl = await new Promise(resolve => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => resolve('');
+      reader.readAsDataURL(file);
+    });
+    if (dataUrl) state.uploaded.push({ name: file.name, dataUrl });
+  }
+  state.prompts = [];
+  renderSkuReferenceSuiteSetup(state);
+}
+
+function removeSkuReferenceUpload(index) {
+  const state = window._skuReferenceSuiteState;
+  if (!state) return;
+  state.uploaded.splice(index, 1);
+  state.prompts = [];
+  renderSkuReferenceSuiteSetup(state);
+}
+
+function toggleSkuReferenceImage(index) {
+  const state = window._skuReferenceSuiteState;
+  if (!state) return;
+  if (state.selected.has(index)) state.selected.delete(index);
+  else state.selected.add(index);
+  state.visualAnalysis = null;
+  state.visualAnalysisFingerprint = '';
+  state.visualAnalysisImageCount = 0;
+  state.prompts = [];
+  state.brief = document.getElementById('skuReferenceBrief')?.value || state.brief;
+  state.count = Number(document.getElementById('skuReferenceCount')?.value || state.count);
+  renderSkuReferenceSuiteSetup(state);
+}
+
+function toggleAllSkuReferenceImages() {
+  const state = window._skuReferenceSuiteState;
+  if (!state) return;
+  state.brief = document.getElementById('skuReferenceBrief')?.value || state.brief;
+  state.count = Number(document.getElementById('skuReferenceCount')?.value || state.count);
+  state.selected = state.selected.size === state.originals.length
+    ? new Set()
+    : new Set(state.originals.map((_, index) => index));
+  state.visualAnalysis = null;
+  state.visualAnalysisFingerprint = '';
+  state.visualAnalysisImageCount = 0;
+  state.prompts = [];
+  renderSkuReferenceSuiteSetup(state);
+}
+
+function setSkuReferencePromptMode(mode) {
+  const state = window._skuReferenceSuiteState;
+  if (!state) return;
+  state.brief = document.getElementById('skuReferenceBrief')?.value || '';
+  state.count = Number(document.getElementById('skuReferenceCount')?.value || state.count);
+  state.mode = mode;
+  state.count = mode === 'deepseek' && state.count < 7 ? 7 : state.count;
+  state.prompts = [];
+  renderSkuReferenceSuiteSetup(state);
+}
+
+function updateSkuReferencePrompt(index, value) {
+  const state = window._skuReferenceSuiteState;
+  if (state?.prompts[index]) state.prompts[index].prompt = value;
+}
+
+function updateSkuReferenceControls() {
+  const state = window._skuReferenceSuiteState;
+  if (!state) return;
+  state.brief = document.getElementById('skuReferenceBrief')?.value || state.brief;
+  state.count = Number(document.getElementById('skuReferenceCount')?.value || state.count);
+  renderSkuReferenceSuiteSetup(state);
+}
+
+function parseSkuReferencePromptPlan(raw, count) {
+  const text = String(raw || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  const parsed = JSON.parse(text);
+  const list = Array.isArray(parsed) ? parsed : parsed.images;
+  if (!Array.isArray(list) || list.length !== count) throw new Error(`DeepSeek 返回 ${list?.length || 0} 条提示词，预期 ${count} 条；请重新生成`);
+  const prompts = list.map((item, index) => ({
+    purpose: String(item?.purpose || SKU_REFERENCE_PROMPT_PURPOSES[index] || `图片 ${index + 1}`).slice(0, 40),
+    prompt: String(item?.prompt || '').trim(),
+  }));
+  if (prompts.some(item => !item.prompt)) throw new Error('部分提示词为空，请重新生成');
+  return prompts;
+}
+
+function parseSkuVisualAnalysis(raw) {
+  let parsed = raw;
+  if (typeof parsed === 'string') {
+    const text = parsed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    try { parsed = JSON.parse(text); } catch (_) { throw new Error('视觉分析结果不是有效 JSON；请重试，若仍失败请减少单批图片数量'); }
+  }
+  if (!parsed || !parsed.product_prototype || !Array.isArray(parsed.parameters) || !Array.isArray(parsed.observed_facts) || !Array.isArray(parsed.ru_selling_points)) {
+    throw new Error('视觉模型返回格式不完整，未生成提示词；请重试');
+  }
+  return {
+    product_prototype: parsed.product_prototype,
+    parameters: parsed.parameters,
+    observed_facts: parsed.observed_facts,
+    ru_selling_points: parsed.ru_selling_points,
+    uncertain_or_conflicting: Array.isArray(parsed.uncertain_or_conflicting) ? parsed.uncertain_or_conflicting : [],
+  };
+}
+
+function mergeSkuVisualAnalyses(results) {
+  const analyses = results.map(parseSkuVisualAnalysis);
+  const prototype = {};
+  const listFields = ['colors', 'materials_and_finish', 'visible_structure', 'included_components', 'must_preserve'];
+  for (const field of ['identity', 'form_factor', 'silhouette']) {
+    prototype[field] = analyses.map(item => String(item.product_prototype[field] || '').trim()).find(Boolean) || '';
+  }
+  for (const field of listFields) {
+    prototype[field] = [...new Set(analyses.flatMap(item => Array.isArray(item.product_prototype[field]) ? item.product_prototype[field] : []).map(value => String(value).trim()).filter(Boolean))];
+  }
+  const mergeList = field => {
+    const seen = new Set();
+    return analyses.flatMap(item => item[field]).filter(item => {
+      const key = JSON.stringify(item);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+  return {
+    product_prototype: prototype,
+    parameters: mergeList('parameters'),
+    observed_facts: mergeList('observed_facts'),
+    ru_selling_points: mergeList('ru_selling_points'),
+    uncertain_or_conflicting: mergeList('uncertain_or_conflicting'),
+  };
+}
+
+async function generateSkuReferencePrompts() {
+  // 人工写提示词：一行一条；只写一条时按张数复制；不再调用 DeepSeek 规划。
+  const state = window._skuReferenceSuiteState;
+  if (!state || state.running) return;
+  state.brief = (document.getElementById('skuReferenceBrief')?.value || '').trim();
+  state.count = Number(document.getElementById('skuReferenceCount')?.value || state.count);
+  if (!state.selected.size && !state.uploaded.length) return Toast.show('请先上传参考图或勾选商品采集图', 'warning');
+  if (!state.brief) return Toast.show('请先写提示词', 'warning');
+  const remaining = Math.max(0, 30 - (window._skuImages?.[state.skuIndex]?.length || 0));
+  if (state.count > remaining) return Toast.show(`当前 SKU 只剩 ${remaining} 个图片位，请先删除图片或减少数量`, 'warning');
+  const lines = state.brief.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  if (!lines.length) return Toast.show('提示词不能为空', 'warning');
+  if (lines.length > state.count) Toast.show(`写了 ${lines.length} 条但只生成 ${state.count} 张，已取前 ${state.count} 条`, 'warning');
+  state.prompts = Array.from({ length: state.count }, (_, index) => ({
+    purpose: SKU_REFERENCE_PROMPT_PURPOSES[index] || `图片 ${index + 1}`,
+    prompt: lines.length === 1 ? lines[0] : (lines[index] || lines[lines.length - 1]),
+  }));
+  renderSkuReferenceSuiteSetup(state);
+}
+
+async function startSkuReferenceSuiteGeneration() {
+  if (!state || state.running || state.sessionId !== window._editSessionId) return;
+  state.count = Number(document.getElementById('skuReferenceCount')?.value || state.count);
+  if (state.count !== state.prompts.length) return Toast.show('生成张数已变化，请重新生成对应数量的提示词', 'warning');
+  if (!state.selected.size && !state.uploaded.length) return Toast.show('请先上传参考图或勾选商品采集图', 'warning');
+  state.prompts.forEach((item, index) => {
+    const field = document.querySelector(`#skuReferenceSuiteBody textarea[oninput="updateSkuReferencePrompt(${index},this.value)"]`);
+    if (field) item.prompt = field.value.trim();
+  });
+  if (!state.prompts.length || state.prompts.some(item => !item.prompt)) return Toast.show('请检查提示词，不可留空', 'warning');
+  const provider = state.providers.find(item => item.key === state.providerKey);
+  if (!provider?.model) return Toast.show('当前图片模型未配置 Model ID', 'warning');
+  const storeId = await resolveSkuWatermarkStoreId();
+  if (!storeId) return;
+  state.running = true;
+  state.cancelRequested = false;
+  state.results = state.prompts.map(item => ({ ...item, url: '', error: '', approved: false }));
+  const body = document.getElementById('skuReferenceSuiteBody');
+  if (body) body.innerHTML = `<p id="skuReferenceSuiteProgress">正在准备参考图…</p><button type="button" class="btn btn-ghost" onclick="cancelSkuReferenceSuiteGeneration()">取消剩余任务</button>`;
+  try {
+    // 参考图两条链路合并：业务员上传（已是 dataURL） + 商品采集图（转 dataURL）
+    const uploadedRefs = state.uploaded.map(item => item.dataUrl).filter(Boolean);
+    const selectedUrls = [...state.selected].map(index => state.originals[index]);
+    const skuRefs = [];
+    for (const url of selectedUrls.slice(0, Math.max(0, 6 - uploadedRefs.length))) {
+      skuRefs.push(await skuImageToReferenceDataUrl(url));
+    }
+    const references = uploadedRefs.concat(skuRefs).slice(0, 6);
+    state.watermarkStoreId = storeId;
+    state.referenceData = references;
+    for (let index = 0; index < state.results.length; index++) {
+      if (state.cancelRequested || state.sessionId !== window._editSessionId) break;
+      const progress = document.getElementById('skuReferenceSuiteProgress');
+      if (progress) progress.textContent = `正在生成第 ${index + 1}/${state.results.length} 张…`;
+      try {
+        const result = await Api.generateAIImages({
+          store_id: storeId, provider: provider.key, model: provider.model,
+          prompt: state.results[index].prompt, size: '1024x1360', count: 1,
+          reference_image: references[0], reference_images: references,
+        });
+        if (result?.code !== 200 || !result.data?.assets?.[0]?.url) throw new Error(result?.msg || '模型未返回图片');
+        state.results[index].url = result.data.assets[0].url;
+      } catch (error) { state.results[index].error = error.message || '生成失败'; }
+    }
+  } catch (error) {
+    state.results.forEach(item => { if (!item.url && !item.error) item.error = error.message || '参考图读取失败'; });
+  } finally {
+    state.running = false;
+    state.results.forEach(item => { if (!item.url && !item.error) item.error = '已取消'; });
+    renderSkuReferenceSuiteReview(state);
+  }
+}
+
+function cancelSkuReferenceSuiteGeneration() {
+  if (window._skuReferenceSuiteState) window._skuReferenceSuiteState.cancelRequested = true;
+}
+
+async function retrySkuReferenceSuiteImage(index) {
+  const state = window._skuReferenceSuiteState;
+  const item = state?.results[index];
+  if (!state || state.running || !item?.error || !state.referenceData?.length) return;
+  const provider = state.providers.find(p => p.key === state.providerKey);
+  state.running = true;
+  item.error = '正在重试…';
+  renderSkuReferenceSuiteReview(state);
+  try {
+    const result = await Api.generateAIImages({
+      store_id: state.watermarkStoreId, provider: provider.key, model: provider.model,
+      prompt: item.prompt, size: '1024x1360', count: 1,
+      reference_image: state.referenceData[0], reference_images: state.referenceData,
+    });
+    if (result?.code !== 200 || !result.data?.assets?.[0]?.url) throw new Error(result?.msg || '模型未返回图片');
+    item.url = result.data.assets[0].url; item.error = '';
+  } catch (error) { item.error = error.message || '生成失败'; }
+  finally { state.running = false; renderSkuReferenceSuiteReview(state); }
+}
+
+function toggleSkuReferenceSuiteApproval(index) {
+  const item = window._skuReferenceSuiteState?.results[index];
+  if (item?.url) { item.approved = !item.approved; renderSkuReferenceSuiteReview(window._skuReferenceSuiteState); }
+}
+
+function setAllSkuReferenceSuiteApprovals(approved) {
+  const state = window._skuReferenceSuiteState;
+  if (state) { state.results.forEach(item => { item.approved = Boolean(approved && item.url); }); renderSkuReferenceSuiteReview(state); }
+}
+
+function renderSkuReferenceSuiteReview(state) {
+  if (window._skuReferenceSuiteState !== state || state.sessionId !== window._editSessionId) return;
+  const body = document.getElementById('skuReferenceSuiteBody');
+  if (!body) return;
+  body.innerHTML = `<p>逐张审核，只有通过的图片会追加到当前 SKU；采集原图不会被替换。</p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;max-height:65vh;overflow:auto;">${state.results.map((item, index) => `<div style="border:1px solid var(--border-color);border-radius:8px;padding:10px;">
+      <b>${index + 1}. ${escapeHtml(item.purpose)}</b>
+      ${item.url ? `<img src="${escapeAttr(proxyImage(item.url))}" alt="生成图 ${index + 1}" style="width:100%;aspect-ratio:3/4;object-fit:contain;background:#f6f6f6;margin:8px 0;">` : `<div style="aspect-ratio:3/4;display:grid;place-items:center;background:#f6f6f6;margin:8px 0;">${escapeHtml(item.error || '等待生成')}</div>`}
+      <p style="font-size:12px;max-height:60px;overflow:auto;">${escapeHtml(item.prompt)}</p>
+      ${item.url ? `<button type="button" class="btn btn-sm ${item.approved ? 'btn-primary' : 'btn-secondary'}" onclick="toggleSkuReferenceSuiteApproval(${index})">${item.approved ? '已通过' : '通过并追加'}</button>` : (!state.running && item.error && item.error !== '正在重试…' ? `<button type="button" class="btn btn-sm btn-secondary" onclick="retrySkuReferenceSuiteImage(${index})">重试这张</button>` : '')}
+    </div>`).join('')}</div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;">
+      <button type="button" class="btn btn-ghost" onclick="setAllSkuReferenceSuiteApprovals(false)">全部取消通过</button>
+      <button type="button" class="btn btn-secondary" onclick="setAllSkuReferenceSuiteApprovals(true)">全部通过</button>
+      <button type="button" class="btn btn-primary" onclick="applySkuReferenceSuiteApprovals()">追加已通过图片（${state.results.filter(item => item.approved && item.url).length}）</button>
+    </div>`;
+  if (window.lucide) window.lucide.createIcons();
+}
+
+function applySkuReferenceSuiteApprovals() {
+  const state = window._skuReferenceSuiteState;
+  if (!state || state.sessionId !== window._editSessionId) return Toast.show('编辑会话已变化，请重新生成', 'warning');
+  const approved = state.results.filter(item => item.approved && item.url).map(item => item.url);
+  if (!approved.length) return Toast.show('请先审核通过至少一张图片', 'warning');
+  const current = window._skuImages?.[state.skuIndex] || [];
+  const unique = approved.filter(url => !current.includes(url));
+  if (current.length + unique.length > 30) return Toast.show(`当前 SKU 最多 30 张，还剩 ${Math.max(0, 30 - current.length)} 个图片位`, 'warning');
+  window._skuImages[state.skuIndex] = [...current, ...unique];
+  refreshSkuImageCell(state.skuIndex);
+  updateTotalSkuImageCount();
+  if (window._editingProduct) _draftSaveWithFormSync(window._editingProduct);
+  window._skuReferenceSuiteState = null;
+  Modal.close();
+  Toast.show(`已将 ${unique.length} 张审核通过的图片追加到编辑草稿；提交时仍需点击保存`, 'success');
+}
+
+
 
 /** 添加SKU图片 - 弹出上传方式选择菜单 */
 function addSkuImage(skuIndex, event) {
@@ -3684,6 +4293,13 @@ function handleUploadMethod(method, skuIndex) {
 
 /** 本地上传：先上传到后端获取公网URL，再添加到SKU图片列表 */
 const _editImageUploads = new Set();
+const _editImageUploadErrors = new Map();
+async function waitForEditImageUploads() {
+  await Promise.allSettled(Array.from(_editImageUploads).filter(job => job._editSessionId === window._editSessionId));
+  if (_editImageUploadErrors.size) {
+    throw new Error('以下图片上传失败，请重新选择上传后再保存：' + Array.from(_editImageUploadErrors.values()).join('、'));
+  }
+}
 function uploadLocalFile(skuIndex) {
   const session = window._editSessionId;
   const input = document.createElement('input');
@@ -3696,6 +4312,7 @@ function uploadLocalFile(skuIndex) {
       const available = Math.max(0, 30 - window._skuImages[skuIndex].length);
       const validFiles = Array.from(input.files || []).filter(file => {
         if (file.size <= 10 * 1024 * 1024) return true;
+        _editImageUploadErrors.set(`${skuIndex}:${file.name}`, file.name);
         Toast.show('图片不能超过10MB：' + file.name, 'warning');
         return false;
       }).slice(0, available);
@@ -3703,28 +4320,32 @@ function uploadLocalFile(skuIndex) {
       _draftSaveWithFormSync(window._editingProduct);
 
       let nextIndex = 0;
-      const uploadResults = new Array(validFiles.length);
       async function uploadNext() {
         while (nextIndex < validFiles.length && window._editSessionId === session) {
           const index = nextIndex++;
           const file = validFiles[index];
+          const fileKey = `${skuIndex}:${file.name}`;
           Toast.show('图片上传中：' + file.name, 'info', 2000);
-          const res = await Api.uploadImage(file);
+          let res;
+          try {
+            res = await Api.uploadImage(file);
+          } catch (err) {
+            res = { msg: err.message || '网络异常' };
+          }
           if (window._editSessionId !== session) return;
           if (res.code === 200 && res.data?.url) {
-            uploadResults[index] = res.data.url;
+            _editImageUploadErrors.delete(fileKey);
+            addSkuImageUrl(skuIndex, res.data.url);
           } else {
+            _editImageUploadErrors.set(fileKey, file.name);
             Toast.show('图片上传失败：' + (res.msg || '请重试'), 'error');
           }
         }
       }
       const workerCount = Math.min(3, validFiles.length);
       await Promise.all(Array.from({ length: workerCount }, uploadNext));
-      if (window._editSessionId !== session) return;
-      uploadResults.forEach(url => {
-        if (url) addSkuImageUrl(skuIndex, url);
-      });
     })();
+    job._editSessionId = session;
     _editImageUploads.add(job);
     job.catch(err => Toast.show('图片上传失败：' + err.message, 'error'))
       .finally(() => _editImageUploads.delete(job));
@@ -3732,52 +4353,54 @@ function uploadLocalFile(skuIndex) {
   input.click();
 }
 
-/** 选择空间图片（占位，可对接图床） */
-function selectSpaceImage(skuIndex) {
+/** 从 ERP 图库多选图片并加入当前 SKU。 */
+async function selectSpaceImage(skuIndex) {
   Modal.show({
-    title: '选择空间图片（图库）',
+    title: '选择 ERP 图库图片',
     size: 'lg',
-    body: `
-      <div class="form-group">
-        <p style="color:var(--text-secondary);font-size:13px;line-height:1.6;">从图库选择图片，点击「使用」后自动转存为公网地址并加入当前 SKU。</p>
-        <div id="spaceImageGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;max-height:420px;overflow-y:auto;margin-top:10px;">
-          <div style="grid-column:1/-1;text-align:center;color:var(--text-tertiary);padding:30px;">正在读取图库...</div>
-        </div>
-      </div>
-    `,
-    footer: [{ text: '关闭', class: 'btn-ghost' }],
-    onOpen: () => loadSpaceImageGrid(skuIndex),
+    body: '<div class="sku-image-picker" id="erpGalleryPicker"><div style="color:var(--text-tertiary);font-size:13px;padding:8px 0;">正在读取图库...</div></div>',
+    footer: [
+      { text: '取消', class: 'btn-ghost' },
+      { text: '添加已选图片', class: 'btn-primary', onClick: () => addSelectedGalleryImages(skuIndex) },
+    ],
+  });
+
+  const response = await Api.getGallery();
+  const target = document.getElementById('erpGalleryPicker');
+  if (!target) return;
+  const assets = response?.code === 200 ? (response.data?.list || []) : [];
+  if (!assets.length) {
+    target.innerHTML = '<div style="color:var(--text-tertiary);font-size:13px;padding:8px 0;">图库暂无图片，请先在“我的图库”上传或使用 AI 图片生成。</div>';
+    return;
+  }
+  target.innerHTML = assets.map(asset => `
+    <label class="picker-thumb" title="${escapeAttr(asset.title || asset.original_name || '图库图片')}">
+      <input type="checkbox" class="erp-gallery-image-option" value="${escapeAttr(asset.url)}" style="position:absolute;opacity:0;pointer-events:none;">
+      <img src="${escapeAttr(asset.url)}" alt="${escapeAttr(asset.title || '图库图片')}" loading="lazy">
+    </label>`).join('');
+  target.querySelectorAll('.erp-gallery-image-option').forEach(input => {
+    input.addEventListener('change', () => input.parentElement.classList.toggle('is-selected', input.checked));
   });
 }
 
-async function loadSpaceImageGrid(skuIndex) {
-  const grid = document.getElementById('spaceImageGrid');
-  if (!grid) return;
-  const resp = await Api.getGallery({ source: '' });
-  const assets = resp?.code === 200 ? (resp.data?.list || []) : [];
-  if (!assets.length) {
-    grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text-tertiary);padding:30px;">图库暂无图片，请先到「AI图片生成 / 我的图库」上传或生成</div>';
-    return;
+function addSelectedGalleryImages(skuIndex) {
+  const urls = Array.from(document.querySelectorAll('.erp-gallery-image-option:checked')).map(input => input.value);
+  if (!urls.length) return Toast.show('请至少选择一张图库图片', 'warning');
+  const images = window._skuImages[skuIndex] || (window._skuImages[skuIndex] = []);
+  let added = 0;
+  urls.forEach(url => {
+    if (images.length < 30 && !images.includes(url)) {
+      images.push(url);
+      added++;
+    }
+  });
+  refreshSkuImageCell(skuIndex);
+  if (added) {
+    Modal.close();
+    Toast.show(`已添加 ${added} 张 ERP 图库图片`, 'success');
+  } else {
+    Toast.show('图片已存在或已达上限', 'info');
   }
-  grid.innerHTML = assets.map(a => `
-    <div style="border:1px solid var(--border-color);border-radius:8px;overflow:hidden;">
-      <img src="${escapeAttr(a.url)}" style="width:100%;height:90px;object-fit:cover;display:block;" loading="lazy">
-      <button type="button" onclick="useSpaceImage(${skuIndex}, '${escapeAttr(a.url)}')" style="width:100%;padding:5px;font-size:12px;border:none;background:var(--primary);color:#fff;cursor:pointer;">使用</button>
-    </div>
-  `).join('');
-  if (window.lucide) lucide.createIcons();
-}
-
-async function useSpaceImage(skuIndex, url) {
-  Toast.show('正在转存图片...', 'info');
-  const resp = await Api.transferImages([url]);
-  const result = resp?.data?.results?.[0];
-  if (resp?.code !== 200 || !result?.success) {
-    Toast.show('转存失败：' + (result?.error || resp?.msg || '未知错误'), 'error');
-    return;
-  }
-  addSkuImageUrl(skuIndex, result.url);
-  Toast.show('已添加到当前 SKU', 'success');
 }
 
 /** 使用网络图片（URL输入弹窗） */
@@ -4155,7 +4778,11 @@ async function deleteSkuRow(index) {
  * 拼接来源平台、时间戳和颜色属性值。
  * 示例：1688-08081230-红色、1688-08081230-蓝色；无颜色属性时格式：1688-08081230
  */
-function autoGenerateSkuCodes() {
+function autoGenerateSkuCodes(options = {}) {
+  if (window._editingProduct?._editorMode === 'online') {
+    if (!options.silent) Toast.show('在线商品编辑会保留原 Ozon SKU 编码', 'warning');
+    return;
+  }
   console.log('[autoGenerateSkuCodes] 开始执行');
   const rows = document.querySelectorAll('#skuTableWrap tr[data-sku-index]');
   console.log('[autoGenerateSkuCodes] 找到SKU行:', rows.length);
@@ -4239,7 +4866,9 @@ function addManualSkuRow() {
       return !INFO_ATTR_SKIP_KEYWORDS_ROW.some(kw => a.name.toLowerCase().includes(kw.toLowerCase()));
     }
     return false;
-  });
+  }).sort((a, b) =>
+    (a.attrCategory === 'sales' ? 0 : a.attrCategory === 'info' ? 2 : 1)
+    - (b.attrCategory === 'sales' ? 0 : b.attrCategory === 'info' ? 2 : 1));
   const skuAttrCells = tableAttrsForRow.map(attr => {
     if (attr.attrCategory === 'info') {
       // SKU信息属性：输入框
@@ -4993,6 +5622,9 @@ function collectEditFormToProduct(product, opts = {}) {
   if (sourceLinks.length > 0) {
     product.sourceLink = sourceLinks[0].url || '';
     if (sourceLinks[0].remark) product.sourceName = sourceLinks[0].remark;
+  } else {
+    product.sourceLink = '';
+    product.sourceName = '';
   }
 
   // 保存类目ID（Ozon发布必需）
@@ -5150,7 +5782,12 @@ function collectEditFormToProduct(product, opts = {}) {
  * 后端失败时不会关闭弹窗，提示用户后保留修改
  */
 async function saveProductData(product) {
-  await Promise.allSettled(Array.from(_editImageUploads));
+  try {
+    await waitForEditImageUploads();
+  } catch (err) {
+    Toast.show(err.message, 'error', 6000);
+    return false;
+  }
   try {
     // 1. 收集并校验（保存时只校验类目必填属性，发布校验由 publishProduct 单独负责）
     collectEditFormToProduct(product);
@@ -5239,7 +5876,9 @@ function collectSkuTableData() {
       return !INFO_ATTR_SKIP_KEYWORDS.some(kw => a.name.toLowerCase().includes(kw.toLowerCase()));
     }
     return false;
-  });
+  }).sort((a, b) =>
+    (a.attrCategory === 'sales' ? 0 : a.attrCategory === 'info' ? 2 : 1)
+    - (b.attrCategory === 'sales' ? 0 : b.attrCategory === 'info' ? 2 : 1));
 
   // 颜色名称与商品颜色在合并卡片中共享值索引（values[vi] 一一对应）。
   // 颜色名称不在表格列中显示，但需要按 SKU 独立提交到 sources[].attributes。
@@ -5557,7 +6196,7 @@ function replaceImageUrls(product, urlMap) {
 
 /** 仅保存商品数据（不关闭弹窗、不显示Toast） */
 async function saveProductDataOnly(product) {
-  await Promise.allSettled(Array.from(_editImageUploads));
+  await waitForEditImageUploads();
   try {
     // 复用公共收集逻辑（保存并发布场景跳过必填校验，由 publishProduct 单独校验）
     collectEditFormToProduct(product, { skipValidation: true });
@@ -5773,7 +6412,21 @@ async function publishProduct(id, fromSaveAndPublish = false, storeId = null, op
     payload.storeId = storeId;
     const publishMode = options.publishMode || resolvePublishMode(product);
     if (publishMode) payload.publishMode = publishMode;
-    const res = await Api.submitPublish(payload);
+    const previousTaskId = product.publishTaskId;
+    let res = await Api.submitPublish(payload);
+    if (res.code === -1 || res.code === -2) {
+      // 提交可能已在服务端创建任务，只是响应丢失；先核对，避免误报失败及重复上架。
+      const latest = await Api.getProduct(id);
+      const taskId = latest.data?.publishTaskId;
+      if (latest.code === 200 && taskId
+          && (taskId !== previousTaskId || latest.data.publishStatus === 'processing')) {
+        Object.assign(product, latest.data);
+        res = { code: 200, data: { taskIds: [taskId] } };
+      } else {
+        Toast.show('发布请求超时，提交结果尚未确认；请先查看上架记录，勿重复提交', 'warning', 8000);
+        return false;
+      }
+    }
 
     // 后端在所有任务立即失败时返回非 200 code（含 data.tasks 详情）
     if (res.code !== 200) {
@@ -5823,7 +6476,7 @@ async function publishProduct(id, fromSaveAndPublish = false, storeId = null, op
 }
 
 /** 轮询发布状态。首次立即检查，之后按 interval 间隔轮询 */
-async function pollPublishStatus(productId, taskId, maxRetries = 12, interval = 10000) {
+async function pollPublishStatus(productId, taskId, maxRetries = 30, interval = 20000) {
   for (let i = 0; i < maxRetries; i++) {
     // 首次立即检查（i===0 不等待），后续按 interval 间隔轮询
     if (i > 0) {
@@ -5901,10 +6554,30 @@ async function pollPublishStatus(productId, taskId, maxRetries = 12, interval = 
     product.publishStatus = 'processing';
     renderTable();
   }
-  Toast.show('发布状态查询超时，请稍后在列表中刷新查看', 'warning');
+  Toast.show('Ozon 仍在处理，请稍后在上架记录中查看；这不表示上架失败', 'warning');
 }
 
 /** 删除商品 */
+/** 送 JLC 工作区生产：把 ERP 采集箱商品桥接到 JLC（生成 P 号商品跑 15 步流水线）。 */
+async function sendToJlc(id) {
+  try {
+    const res = await Api.request('/api/ext/product/export-to-jlc', {
+      method: 'POST',
+      body: JSON.stringify({ productId: id }),
+    });
+    if (res.code === 200 && res.data && res.data.jlcProductId) {
+      Toast.show('已送进 JLC 工作区：' + res.data.jlcProductId + '，可运行流水线上架', 'success', 6000);
+      const p = allProducts.find(x => x.id === id);
+      if (p) p.jlcProductId = res.data.jlcProductId;
+      renderTable();
+    } else {
+      Toast.show(res.msg || '送 JLC 失败', 'error', 8000);
+    }
+  } catch (e) {
+    Toast.show('送 JLC 异常：' + (e && e.message ? e.message : e), 'error', 8000);
+  }
+}
+
 async function deleteProduct(id) {
   const confirmed = await Modal.confirm('确定要删除该商品吗？');
   if (!confirmed) return;
@@ -9229,6 +9902,7 @@ async function autoMatchBrand(inputEl, sourceValue) {
 
 /** 回填已保存的类目属性值（等待字典值加载完成后再设置 select） */
 function fillAttributeValues(savedAttrs) {
+  document.getElementById('ozon-unmapped-attributes')?.remove();
   if (!savedAttrs || !savedAttrs.length) return;
 
   // 统一兼容采集扁平格式、ERP 格式和 Ozon API 嵌套 values 格式。
@@ -9344,6 +10018,7 @@ function fillAttributeValues(savedAttrs) {
   };
 
   let matchedCount = 0;
+  const unmappedForReview = [];
   // 未匹配到类目属性表单元素的属性，稍后尝试回填到 SKU 属性（商品颜色/颜色名称）
   const unmatchedForSku = [];
   savedAttrs.forEach(sa => {
@@ -9369,6 +10044,7 @@ function fillAttributeValues(savedAttrs) {
 
     if (!targetEl) {
       unmatchedForSku.push(sa);
+      unmappedForReview.push(sa);
       return;
     }
     matchedCount++;
@@ -9405,6 +10081,8 @@ function fillAttributeValues(savedAttrs) {
             console.log('[fillAttributeValues] 多选属性自动匹配:', sa.value, '→', matchedIds, matchedLabels);
           } else {
             console.log('[fillAttributeValues] 多选属性字典值未匹配:', sa.value);
+            unmappedForReview.push(sa);
+            renderUnmappedCollectedAttributes(unmappedForReview);
           }
         })();
         return;
@@ -9486,8 +10164,14 @@ function fillAttributeValues(savedAttrs) {
               console.log('[fillAttributeValues] 自动匹配属性值:', sa.value, '→', matched.text, '(id:', matched.value_id + ')');
             } else {
               console.log('[fillAttributeValues] 字典值未匹配:', sa.value);
+              unmappedForReview.push(sa);
+              renderUnmappedCollectedAttributes(unmappedForReview);
             }
-          }).catch(e => console.warn('[fillAttributeValues] autoMatchAttrValue 失败:', e));
+          }).catch(e => {
+            console.warn('[fillAttributeValues] autoMatchAttrValue 失败:', e);
+            unmappedForReview.push(sa);
+            renderUnmappedCollectedAttributes(unmappedForReview);
+          });
         }
       }
     } else if (targetEl.classList.contains('attr-search-field')) {
@@ -9644,7 +10328,7 @@ function fillAttributeValues(savedAttrs) {
             renderSkuAttrs();
             generateSkuTable();
             // 颜色匹配完成后自动生成平台SKU编码
-            setTimeout(() => { try { autoGenerateSkuCodes(); } catch (e) { console.warn('[autoGenerateSkuCodes] 失败:', e); } }, 100);
+            setTimeout(() => { try { autoGenerateSkuCodes({ silent: true }); } catch (e) { console.warn('[autoGenerateSkuCodes] 失败:', e); } }, 100);
             console.log('[fillAttributeValues] 商品颜色字典匹配完成:', matched.map(m => ({ text: m.text, id: m.value_id })));
           }
         } catch (e) {
@@ -9658,7 +10342,7 @@ function fillAttributeValues(savedAttrs) {
       if (typeof generateSkuTable === 'function') generateSkuTable();
       // 无异步颜色匹配时，直接自动生成平台SKU编码
       if (!willAsyncMatch) {
-        setTimeout(() => { try { autoGenerateSkuCodes(); } catch (e) { console.warn('[autoGenerateSkuCodes] 失败:', e); } }, 100);
+        setTimeout(() => { try { autoGenerateSkuCodes({ silent: true }); } catch (e) { console.warn('[autoGenerateSkuCodes] 失败:', e); } }, 100);
       }
     }
   }
@@ -9669,6 +10353,35 @@ function fillAttributeValues(savedAttrs) {
     未匹配: savedAttrs.length - matchedCount,
     SKU属性回填: skuFilled,
   });
+  renderUnmappedCollectedAttributes(unmappedForReview);
+}
+
+function renderUnmappedCollectedAttributes(attributes) {
+  const attrList = document.getElementById('attrList');
+  if (!attrList) return;
+  const oldPanel = document.getElementById('ozon-unmapped-attributes');
+  if (oldPanel) oldPanel.remove();
+  if (!attributes.length) return;
+
+  const panel = document.createElement('section');
+  panel.id = 'ozon-unmapped-attributes';
+  panel.style.cssText = 'margin:12px 0;padding:12px;border:1px solid #f0c36d;border-radius:8px;background:#fff9e8;font-size:13px;';
+  const heading = document.createElement('strong');
+  heading.textContent = `有 ${attributes.length} 条采集属性未自动对应`;
+  panel.appendChild(heading);
+  const hint = document.createElement('p');
+  hint.textContent = '原始属性已保留，但未匹配到当前类目字段或字典值；请人工核对后填写，系统不会猜测。';
+  panel.appendChild(hint);
+  const list = document.createElement('ul');
+  list.style.cssText = 'margin:6px 0 0;padding-left:20px;';
+  attributes.forEach(attribute => {
+    const item = document.createElement('li');
+    const value = typeof attribute.value === 'string' ? attribute.value : JSON.stringify(attribute.value ?? '');
+    item.textContent = `${attribute.name || '未命名属性'}：${value}`;
+    list.appendChild(item);
+  });
+  panel.appendChild(list);
+  attrList.appendChild(panel);
 }
 
 // ===== 品牌属性搜索 =====

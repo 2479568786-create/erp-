@@ -15,9 +15,6 @@ const PROVIDER_ICONS = {
   openai: '⚡',
   yandexgpt: '🇷🇺',
   custom: '⚙️',
-  apiyi: '🎨',
-  apiyi_banana: '🍌',
-  yyds: '🧪',
   lingkeai: '🔗',
 };
 
@@ -506,7 +503,8 @@ function renderProviderCards() {
   const cards = Object.entries(providers).map(([key, p]) => {
     const isActive = key === activeKey;
     const hasKey = !!p.has_key;
-    const isBuiltin = ['deepseek', 'qwen', 'openai', 'yandexgpt', 'apiyi', 'apiyi_banana', 'yyds', 'lingkeai', 'custom'].includes(key);
+    const isBuiltin = ['deepseek', 'qwen', 'openai', 'yandexgpt', 'lingkeai', 'shangdekuai_lingke', 'custom'].includes(key);
+    const isScopedProvider = key === 'shangdekuai_lingke';
     const icon = PROVIDER_ICONS[key] || '🤖';
 
     return `
@@ -555,7 +553,7 @@ function renderProviderCards() {
           <button class="btn btn-sm btn-ghost" onclick="showEditProviderDialog('${key}')">
             <i data-lucide="edit-2" style="width:13px;height:13px;"></i> 编辑
           </button>
-          ${isActive
+          ${isActive || isScopedProvider
             ? ''
             : `<button class="btn btn-sm btn-primary" onclick="activateProvider('${key}')" ${!hasKey ? 'disabled title="请先配置 API Key"' : ''}>
                  <i data-lucide="check" style="width:13px;height:13px;"></i> 设为默认

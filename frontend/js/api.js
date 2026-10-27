@@ -127,6 +127,7 @@ const Api = (() => {
     return request(`/api/products/${id}`, {
       method: 'PUT',
       body: JSON.stringify(productData),
+      timeout: 90000, // 更新类目时可能同步重新匹配
     });
   }
 
@@ -158,12 +159,13 @@ const Api = (() => {
     return request('/api/publish', {
       method: 'POST',
       body: JSON.stringify(taskData),
+      timeout: 60000,
     });
   }
 
   /** 查询发布状态 */
   function getPublishStatus(taskId) {
-    return request(`/api/publish/${taskId}/status`);
+    return request(`/api/publish/${taskId}/status`, { timeout: 60000 });
   }
 
   /** 重试失败的发布任务（支持断点续传） */
@@ -257,6 +259,16 @@ const Api = (() => {
     return request('/api/ai/generate', {
       method: 'POST',
       body: JSON.stringify(params),
+      timeout: params?.type === 'image_prompts' ? 180000 : TIMEOUT,
+    });
+  }
+
+  /** Analyze collected product images with the configured DeepSeek vision model */
+  function analyzeProductImages(data) {
+    return request('/api/ai/analyze-product-images', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeout: 180000,
     });
   }
 
@@ -589,7 +601,7 @@ const Api = (() => {
       return request('/api/images/upload', {
         method: 'POST',
         body: formData,
-        timeout: 60000,
+        timeout: 180000,
       });
     }
     // 否则按 base64 JSON 上传
@@ -774,6 +786,29 @@ const Api = (() => {
     return request(`/api/online-products/${id}`, { method: 'DELETE' });
   }
 
+  function createShangDeKuaiCollectionJob(sourceUrl) {
+    return request('/api/shangdekuai/collection-jobs', {
+      method: 'POST',
+      body: JSON.stringify({ source_url: sourceUrl }),
+    });
+  }
+
+  function getShangDeKuaiCollectionJob(jobId) {
+    return request(`/api/shangdekuai/collection-jobs/${jobId}`);
+  }
+
+  function completeShangDeKuaiCollectionJob(jobId, result) {
+    return request(`/api/shangdekuai/collection-jobs/${jobId}/complete`, {
+      method: 'POST', body: JSON.stringify(result), timeout: 30000,
+    });
+  }
+
+  function failShangDeKuaiCollectionJob(jobId, errorCode) {
+    return request(`/api/shangdekuai/collection-jobs/${jobId}/fail`, {
+      method: 'POST', body: JSON.stringify({ error_code: errorCode }),
+    });
+  }
+
   function getGallery(params = {}) {
     const qs = new URLSearchParams(params).toString();
     return request(`/api/gallery${qs ? '?' + qs : ''}`);
@@ -805,13 +840,25 @@ const Api = (() => {
     });
   }
 
-  function getPixPixStatus() { return request('/api/pixpix/status'); }
-  function startPixPixOAuth() { return request('/api/pixpix/oauth/start', { method: 'POST' }); }
-  function getPixPixTools() { return request('/api/pixpix/tools', { timeout: 30000 }); }
-  function generatePixPixImages(data) {
-    return request('/api/pixpix/images/generate', {
-      method: 'POST', body: JSON.stringify(data), timeout: 240000,
+
+  function getShopWatermark(storeId) {
+    return request(`/api/watermark/shops/${storeId}`);
+  }
+  function uploadShopWatermark(storeId, file) {
+    const form = new FormData();
+    form.append('file', file);
+    return request(`/api/watermark/shops/${storeId}/image`, { method: 'PUT', body: form });
+  }
+  function updateShopWatermarkSettings(storeId, config) {
+    return request(`/api/watermark/shops/${storeId}/settings`, { method: 'PUT', body: JSON.stringify(config) });
+  }
+  async function getShopWatermarkImage(storeId) {
+    const token = Store?.getToken?.();
+    const response = await fetch(`${BASE_URL}/api/watermark/shops/${storeId}/image`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
     });
+    if (!response.ok) throw new Error('读取店铺水印预览失败');
+    return URL.createObjectURL(await response.blob());
   }
 
   // 公开接口
@@ -842,6 +889,7 @@ const Api = (() => {
     batchDeletePublishRecords,
     batchSubmitPublishRecords,
     aiGenerate,
+    analyzeProductImages,
     getAIModels,
     getAIAvailableModels,
     getAIModelsStatus,
@@ -904,15 +952,19 @@ const Api = (() => {
     batchUpdateOnlineProducts,
     batchDeleteOnlineProducts,
     deleteOnlineProduct,
+    createShangDeKuaiCollectionJob,
+    getShangDeKuaiCollectionJob,
+    completeShangDeKuaiCollectionJob,
+    failShangDeKuaiCollectionJob,
     getGallery,
     uploadGallery,
     updateGalleryAsset,
     deleteGalleryAsset,
     generateAIImages,
-    getPixPixStatus,
-    startPixPixOAuth,
-    getPixPixTools,
-    generatePixPixImages,
+    getShopWatermark,
+    uploadShopWatermark,
+    updateShopWatermarkSettings,
+    getShopWatermarkImage,
     request,
   };
 })();
