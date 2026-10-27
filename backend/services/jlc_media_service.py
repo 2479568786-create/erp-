@@ -8,7 +8,7 @@
 - 参考图：`images` 必须是数组，元素可为公网直链 URL 或 data:<mime>;base64,...
 - 失败：HTTP 200 但 body.code=402 表示余额不足，需读 body.code 不能只看 HTTP 状态
 
-API Key 来自环境变量 `JLC_API_KEY`，绝不写在代码里。
+API Key 复用「AI 生图模块」的凌科 key（ai_models.json → lingkeai），代码里不存任何 key。
 """
 from __future__ import annotations
 
@@ -30,10 +30,19 @@ class JLCError(Exception):
 
 
 def _api_key():
+    """复用「AI 生图模块」的凌科 key（ai_models.json 的 lingkeai），不再单独配置一把。"""
+    try:
+        from services.ai_config_service import get_ai_config
+        config = get_ai_config('lingkeai') or {}
+        key = str(config.get('api_key') or '').strip()
+        if key:
+            return key
+    except Exception:
+        pass
     key = (os.environ.get('JLC_API_KEY') or '').strip()
-    if not key:
-        raise JLCError('JLC_API_KEY 未配置')
-    return key
+    if key:
+        return key
+    raise JLCError('凌科 AI 未配置 API Key，请到「模型管理」填写 lingkeai 的 key')
 
 
 def _request(method, path, body=None, timeout=90):
