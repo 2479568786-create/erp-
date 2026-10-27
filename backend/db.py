@@ -149,6 +149,64 @@ def _migrate_image_billing(conn):
     conn.commit()
 
 
+def _migrate_gallery_folders(conn):
+    """套图文件夹表：补齐「库里存在、但没有任何代码创建」的两张表。
+
+    2026-10-28 审计发现：线上库有 gallery_folders / gallery_folder_assets，
+    但 schema.sql 和 db.py 都不创建它们（历史版本遗留），
+    一旦在全新服务器上部署，图库文件夹接口会因缺表直接 500。
+    这里补成幂等建表，线上与仓库 schema.sql（超集）都能自洽。
+    """
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS gallery_folders (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            name       TEXT    NOT NULL,
+            created_at TEXT    NOT NULL,
+            updated_at TEXT    NOT NULL
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gallery_folders_user_created "
+        "ON gallery_folders(user_id, created_at DESC)"
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS gallery_folder_assets (
+            folder_id INTEGER NOT NULL REFERENCES gallery_folders(id) ON DELETE CASCADE,
+            asset_id  INTEGER NOT NULL REFERENCES gallery_assets(id) ON DELETE CASCADE,
+            position  INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(folder_id, asset_id)
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gallery_folder_assets_asset "
+        "ON gallery_folder_assets(asset_id)"
+    )
+    conn.commit()
+
+
+def _migrate_research_owner_ids(conn):
+    """选品池 owner_ids：线上库有该列、但 schema.sql / db.py 都没有创建逻辑。
+
+    2026-10-28 审计发现：``models/research.py`` 与 ``routes/research_routes.py``
+    都在读写 ``product_research_items.owner_ids``（JSON 数组，记录可见账号 id），
+    线上库靠历史手工加列存在；全新部署会因缺列直接 OperationalError。
+    这里补成幂等加列。
+    """
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='product_research_items'"
+    ).fetchone()
+    if not exists:
+        return
+    columns = {row['name'] for row in conn.execute("PRAGMA table_info(product_research_items)")}
+    if 'owner_ids' not in columns:
+        conn.execute(
+            "ALTER TABLE product_research_items "
+            "ADD COLUMN owner_ids TEXT NOT NULL DEFAULT '[]'"
+        )
+    conn.commit()
+
+
 def _run_migrations(conn):
     """执行增量数据库迁移（幂等：列已存在时跳过）"""
     # 迁移0：accounts 表角色扩展（支持 salesperson 业务员角色）
@@ -161,6 +219,12 @@ def _run_migrations(conn):
 
     # 迁移0.6：生图计费（账号余额/生图开关 + 扣点流水 + 充值审计）
     _migrate_image_billing(conn)
+
+    # 迁移0.7：图库套图文件夹（历史遗留表，补齐创建逻辑，避免新库缺表）
+    _migrate_gallery_folders(conn)
+
+    # 迁移0.8：选品池 owner_ids 列（历史手工列，补齐迁移避免新库缺列）
+    _migrate_research_owner_ids(conn)
 
     # 迁移1：ozon_attribute_dictionary_values 添加 description_category_id 和 type_id 列
     # 原因：dictionary_id 在 Ozon 中可能被多个类目共享（如"类型"属性），
