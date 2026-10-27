@@ -7,6 +7,7 @@ from models.product import PublishRecord, Product
 from services.publish_service import PublishService
 from utils.response import success_response, error_response, paginate_response, handle_errors
 from utils.validators import extract_pagination
+from utils.auth import get_current_user, visible_ozon_store_ids
 
 publish_record_bp = Blueprint('publish_records', __name__)
 
@@ -21,6 +22,13 @@ def get_publish_records():
     store_id = request.args.get('storeId', '')
 
     all_records = PublishRecord.find_all()
+
+    # 角色隔离（2026-10-27）：业务员只看自己店铺的上架记录，**不按状态过滤**，
+    # 所以失败（failed）与有错误（published_with_error）同样可见。
+    user = get_current_user()
+    if user and user.get('role') != 'admin':
+        own = {str(x) for x in (visible_ozon_store_ids(user) or [])}
+        all_records = [r for r in all_records if str(r.get('storeId') or '') in own]
 
     # 筛选
     filtered = all_records

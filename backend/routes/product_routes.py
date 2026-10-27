@@ -952,17 +952,20 @@ def get_products():
     visible_pks = None
     owned_product_ids = None
     own_ozon_store_ids = None
+    all_owned_product_ids = None
     if user.get('role') != 'admin':
         if scope == 'collect':
             visible_pks = set(visible_store_pks(user) or [])
             own_ozon_store_ids = {str(x) for x in (visible_ozon_store_ids(user) or [])}
             owned_product_ids = set()
-            if own_ozon_store_ids:
-                for record in PublishRecord.find_all():
-                    if str(record.get('storeId') or '') in own_ozon_store_ids:
-                        pid = record.get('productId')
-                        if pid:
-                            owned_product_ids.add(str(pid))
+            all_owned_product_ids = set()
+            for record in PublishRecord.find_all():
+                pid = record.get('productId')
+                if not pid:
+                    continue
+                all_owned_product_ids.add(str(pid))
+                if str(record.get('storeId') or '') in own_ozon_store_ids:
+                    owned_product_ids.add(str(pid))
         else:
             visible_pks = set(visible_store_pks(user) or [])
 
@@ -983,17 +986,20 @@ def get_products():
                 if sid_num is not None and sid_num in visible_pks:
                     filtered.append(p)
                     continue
-            # 采集箱：自己的判据宽一些——assignee 是自己、storeId 是自己店铺（Ozon ID 或主键）、
-            # 或者该商品有自己店铺的发布记录（含上架失败）。不看发布状态，失败记录同样可见。
+            # 采集箱（2026-10-27 口径）：自己的 + 无归属的公共池可见；
+            # 有归属但不属于自己（别的业务员/别的店铺）才隐藏。不按发布状态过滤，
+            # 所以上架失败（failed / published_with_error）的记录同样看得见。
             if scope == 'collect':
                 me = {str(user.get('username') or ''), str(user.get('nickname') or '')}
-                if (p.get('assignee') or '') in me:
-                    filtered.append(p)
-                    continue
-                if sid is not None and str(sid) in (own_ozon_store_ids or set()):
-                    filtered.append(p)
-                    continue
-                if str(p.get('id')) in (owned_product_ids or set()):
+                pid = str(p.get('id'))
+                mine = (
+                    (p.get('assignee') or '') in me
+                    or (sid is not None and str(sid) in (own_ozon_store_ids or set()))
+                    or pid in (owned_product_ids or set())
+                )
+                has_owner = bool(p.get('assignee')) or (sid not in (None, '')) \
+                    or pid in (all_owned_product_ids or set())
+                if mine or not has_owner:
                     filtered.append(p)
             # 未绑定店铺（无 storeId）且没有自己归属痕迹的商品业务员不可见
     if status:
