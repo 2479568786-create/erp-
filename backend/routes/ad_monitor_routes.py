@@ -23,6 +23,8 @@ from flask import Blueprint, request
 
 from db import query
 from services import ad_monitor_service as svc
+from services import ad_localize as localize
+from services import ad_ops_service as ops
 from services import ozon_performance_api as perf
 from utils.auth import require_login, require_admin, get_current_user, visible_store_pks
 from utils.response import success_response, error_response, handle_errors
@@ -65,7 +67,7 @@ def overview():
     pks, err = _resolve_target_pks(user)
     if err:
         return err
-    data = svc.build_overview(pks)
+    data = localize.deep(svc.build_overview(pks))
     # 无凭证的店铺一并回报，前端提示去配置
     data['canManage'] = user.get('role') == 'admin'
     return success_response(data=data)
@@ -84,7 +86,7 @@ def alerts():
     if err:
         return err
     stat_date = (request.args.get('date') or '').strip() or None
-    return success_response(data=svc.build_alerts(pks, stat_date))
+    return success_response(data=localize.deep(svc.build_alerts(pks, stat_date)))
 
 
 @ad_monitor_bp.route('/ad-monitor/products', methods=['GET'])
@@ -99,7 +101,7 @@ def products():
     pks, err = _resolve_target_pks(user)
     if err:
         return err
-    result = svc.evaluate_products(pks)
+    result = localize.deep(svc.evaluate_products(pks))
     wanted = (request.args.get('type') or '').strip()
     bucket_map = {
         'test_complete': 'testComplete',
@@ -170,6 +172,7 @@ def campaigns():
         'toDate': r['to_date'],
         'syncedAt': r['synced_at'],
     } for r in rows or []]
+    items = localize.deep(items)
     return success_response(data={'list': items, 'total': len(items)})
 
 
@@ -297,3 +300,164 @@ def test_store(store_pk):
     """凭证连通性自检（不改数据）。"""
     info = perf.test_connection(store_pk)
     return success_response(data=info, msg='连接正常，共发现 %d 个广告活动' % info['campaignCount'])
+
+
+# ============================================================
+# 写操作：预算 / 出价（建议 3）
+#
+# 安全模型：
+#   · preview 只读，任何登录用户都能调（用于确认影响面）
+#   · apply 需要管理员，且必须带 confirm=true
+#   · 护栏在 service 层硬编码，接口无法绕过
+#   · 每次 apply 都写 ad_ops_log，可在 /ad-monitor/ops-log 里查
+# ============================================================
+
+def _ops_store_pk(user, body):
+    """写操作模型必须明确指定 storePk（不允许“全部店铺”批量改预算）。"""
+    store_pk = (body or {}).get('storePk')
+    if not store_pk:
+        return None, error_response('请指定 storePk（写操作不支持批量）', 400)
+    try:
+        store_pk = int(store_pk)
+    except (TypeError, ValueError):
+        return None, error_response('storePk 必须为整数', 400)
+    allowed = _visible_pks(user)
+    if store_pk not in allowed:
+        return None, error_response('无权访问该店铺', 403)
+    return store_pk, None
+
+
+@ad_monitor_bp.route('/ad-monitor/campaigns/<campaign_id>/products', methods=['GET'])
+@handle_errors
+@require_login
+def campaign_products(campaign_id):
+    """活动内商品与当前出价（只读，供「调出价」界面）。"""
+    user = get_current_user()
+    store_pk, err = _ops_store_pk(user, {'storePk': request.args.get('storePk')})
+    if err:
+        return err
+    try:
+        data = ops.list_products(store_pk, campaign_id)
+    except ops.AdOpsError as exc:
+        return error_response(str(exc), 400)
+    return success_response(data=data)
+
+
+@ad_monitor_bp.route('/ad-monitor/campaigns/<campaign_id>/budget/preview', methods=['POST'])
+@handle_errors
+@require_login
+def preview_campaign_budget(campaign_id):
+    """预算变更预演（只读）：返回变更前后、变动幅度与护栏结果。"""
+    user = get_current_user()
+    body = request.get_json(silent=True) or {}
+    store_pk, err = _ops_store_pk(user, body)
+    if err:
+        return err
+    try:
+        data = ops.preview_budget(store_pk, campaign_id,
+                                  daily_budget_rub=body.get('dailyBudgetRub'),
+                                  weekly_budget_rub=body.get('weeklyBudgetRub'))
+    except ops.AdOpsError as exc:
+        return error_response(str(exc), 400)
+    return success_response(data=data, msg='预演通过' if data.get('ok') else '预演发现阻断项')
+
+
+@ad_monitor_bp.route('/ad-monitor/campaigns/<campaign_id>/budget', methods=['POST'])
+@handle_errors
+@require_admin
+def apply_campaign_budget(campaign_id):
+    """执行预算变更（管理员 + confirm=true）。"""
+    user = get_current_user()
+    body = request.get_json(silent=True) or {}
+    store_pk, err = _ops_store_pk(user, body)
+    if err:
+        return err
+    try:
+        data = ops.apply_budget(
+            store_pk, campaign_id,
+            daily_budget_rub=body.get('dailyBudgetRub'),
+            weekly_budget_rub=body.get('weeklyBudgetRub'),
+            confirm=bool(body.get('confirm')),
+            operator=user,
+        )
+    except ops.AdOpsError as exc:
+        return error_response(str(exc), 400)
+    return success_response(data=data, msg='预算已更新')
+
+
+@ad_monitor_bp.route('/ad-monitor/campaigns/<campaign_id>/bids/preview', methods=['POST'])
+@handle_errors
+@require_login
+def preview_campaign_bids(campaign_id):
+    """出价变更预演（只读）：bids=[{sku, bidRub}]，返回改动清单与护栏结果。"""
+    user = get_current_user()
+    body = request.get_json(silent=True) or {}
+    store_pk, err = _ops_store_pk(user, body)
+    if err:
+        return err
+    try:
+        data = ops.preview_bids(store_pk, campaign_id, body.get('bids') or [])
+    except ops.AdOpsError as exc:
+        return error_response(str(exc), 400)
+    return success_response(data=data, msg='预演通过' if data.get('ok') else '预演发现阻断项')
+
+
+@ad_monitor_bp.route('/ad-monitor/campaigns/<campaign_id>/bids', methods=['POST'])
+@handle_errors
+@require_admin
+def apply_campaign_bids(campaign_id):
+    """执行出价变更（管理员 + confirm=true）。"""
+    user = get_current_user()
+    body = request.get_json(silent=True) or {}
+    store_pk, err = _ops_store_pk(user, body)
+    if err:
+        return err
+    try:
+        data = ops.apply_bids(
+            store_pk, campaign_id, body.get('bids') or [],
+            confirm=bool(body.get('confirm')), operator=user,
+        )
+    except ops.AdOpsError as exc:
+        return error_response(str(exc), 400)
+    return success_response(data=data, msg='出价已更新')
+
+
+@ad_monitor_bp.route('/ad-monitor/cpa/min-bids', methods=['POST'])
+@handle_errors
+@require_login
+def cpa_min_bids():
+    """按订单付费固定费率查询（只读参考，不改价）。body: {storePk, skus: []}"""
+    user = get_current_user()
+    body = request.get_json(silent=True) or {}
+    store_pk, err = _ops_store_pk(user, body)
+    if err:
+        return err
+    skus = body.get('skus') or []
+    if not isinstance(skus, list) or not skus:
+        return error_response('请提供 skus 数组', 400)
+    return success_response(data=ops.cpa_min_bids(store_pk, skus))
+
+
+@ad_monitor_bp.route('/ad-monitor/ops-log', methods=['GET'])
+@handle_errors
+@require_login
+def ops_log():
+    """写操作审计日志（管理员看全部，业务员只看自己店铺）。"""
+    user = get_current_user()
+    pks, err = _resolve_target_pks(user)
+    if err:
+        return err
+    store_pk = request.args.get('storePk')
+    if store_pk:
+        try:
+            store_pk = int(store_pk)
+        except (TypeError, ValueError):
+            return error_response('storePk 必须为整数', 400)
+        if store_pk not in pks:
+            return error_response('无权访问该店铺', 403)
+    limit = min(int(request.args.get('limit', 100) or 100), 500)
+    rows = ops.list_ops(store_pk=store_pk, limit=limit)
+    if not store_pk and user.get('role') != 'admin':
+        allowed = set(pks or [])
+        rows = [r for r in rows if r.get('store_pk') in allowed]
+    return success_response(data={'list': rows, 'total': len(rows)})
