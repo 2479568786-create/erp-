@@ -6,9 +6,9 @@ import json
 import html
 import re
 from flask import Blueprint, request
-from models.product import Product
+from models.product import Product, PublishRecord
 from utils.response import success_response, error_response, paginate_response, handle_errors
-from utils.auth import require_login, get_current_user, visible_store_pks
+from utils.auth import require_login, get_current_user, visible_store_pks, visible_ozon_store_ids
 from utils.validators import extract_pagination
 from services.platform_sku_service import ensure_platform_sku_codes
 
@@ -933,9 +933,11 @@ def get_products():
     """获取商品列表（支持分页、状态筛选、关键词搜索）
 
     权限：管理员全量；业务员默认仅本人绑定店铺相关的采集商品（storeId 匹配）。
-    例外：`scope=collect`（采集箱）是**共享区**，所有登录账号都能看到全部采集商品，
-    不再按店铺归属过滤——采集箱里的商品多数「待归属」（没有 storeId），
-    按店铺过滤会让业务员永远看到一个空箱子（2026-10 反馈：员工看不到采集箱）。
+    例外：`scope=collect`（采集箱）。业务员可以进入采集箱，但**只能看到属于自己的
+    商品**：商品 own 判据 = assignee 是自己 / storeId 是自己店铺 / 该商品有自己店铺
+    的发布记录（发布记录里的 storeId 是 Ozon 店铺 ID，需经 stores.store_id → account_id
+    映射）。**不看发布状态**，所以上架失败（failed / published_with_error）的同样可见。
+    没有任何归属痕迹的采集品（未上架、未分配）对业务员不可见，只有管理员能看到。
     """
     user = get_current_user()
     pagination = extract_pagination(request.args)
@@ -946,10 +948,23 @@ def get_products():
     summary = request.args.get('summary') == '1'
 
     # 角色强制过滤：业务员仅可见自己归属店铺的商品
-    # 采集箱（scope=collect）不适用该过滤：它是所有账号共享的待处理区
+    # 采集箱（scope=collect）走「本人商品」判据（含上架失败的），不套用共享区
     visible_pks = None
-    if user.get('role') != 'admin' and scope != 'collect':
-        visible_pks = set(visible_store_pks(user) or [])
+    owned_product_ids = None
+    own_ozon_store_ids = None
+    if user.get('role') != 'admin':
+        if scope == 'collect':
+            visible_pks = set(visible_store_pks(user) or [])
+            own_ozon_store_ids = {str(x) for x in (visible_ozon_store_ids(user) or [])}
+            owned_product_ids = set()
+            if own_ozon_store_ids:
+                for record in PublishRecord.find_all():
+                    if str(record.get('storeId') or '') in own_ozon_store_ids:
+                        pid = record.get('productId')
+                        if pid:
+                            owned_product_ids.add(str(pid))
+        else:
+            visible_pks = set(visible_store_pks(user) or [])
 
     all_products = Product.find_all()
 
@@ -967,7 +982,20 @@ def get_products():
                     sid_num = None
                 if sid_num is not None and sid_num in visible_pks:
                     filtered.append(p)
-            # 未绑定店铺（无 storeId）的商品业务员不可见
+                    continue
+            # 采集箱：自己的判据宽一些——assignee 是自己、storeId 是自己店铺（Ozon ID 或主键）、
+            # 或者该商品有自己店铺的发布记录（含上架失败）。不看发布状态，失败记录同样可见。
+            if scope == 'collect':
+                me = {str(user.get('username') or ''), str(user.get('nickname') or '')}
+                if (p.get('assignee') or '') in me:
+                    filtered.append(p)
+                    continue
+                if sid is not None and str(sid) in (own_ozon_store_ids or set()):
+                    filtered.append(p)
+                    continue
+                if str(p.get('id')) in (owned_product_ids or set()):
+                    filtered.append(p)
+            # 未绑定店铺（无 storeId）且没有自己归属痕迹的商品业务员不可见
     if status:
         filtered = [p for p in filtered if p.get('status') == status]
     if group:
