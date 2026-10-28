@@ -220,6 +220,10 @@ def _migrate_agent_tokens(conn):
         revoked      INTEGER NOT NULL DEFAULT 0
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_tokens_revoked ON agent_tokens(revoked)")
+    # R3：Agent 令牌绑定计费账号（生图扣点用），历史令牌为 NULL 时生图接口会提示重新签发
+    agent_token_cols = {row['name'] for row in conn.execute("PRAGMA table_info(agent_tokens)")}
+    if 'account_id' not in agent_token_cols:
+        conn.execute("ALTER TABLE agent_tokens ADD COLUMN account_id INTEGER")
     conn.execute("""CREATE TABLE IF NOT EXISTS agent_ops (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         token_id    INTEGER,

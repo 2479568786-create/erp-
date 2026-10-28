@@ -63,26 +63,35 @@ def _folder_to_dict(row):
 
 
 def _create_asset(filename, original_name, size, source='upload', prompt='', tags=None, user_id=None,
-                  provider='', model='', endpoint='', reference_count=0, template_version=''):
+                  provider='', model='', endpoint='', reference_count=0, template_version='',
+                  product_id=None, module_key=None, request_id=None, agent_source=None):
     user_id = user_id or (get_current_user() or {}).get('id')
     if not user_id:
         raise ValueError('无法确定图库所属账号，请重新登录')
     asset_id = execute(
         """INSERT INTO gallery_assets
            (user_id, filename, original_name, title, mime_type, file_size, source, prompt, tags,
-            provider, model, endpoint, reference_count, template_version, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            provider, model, endpoint, reference_count, template_version,
+            product_id, module_key, request_id, agent_source, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (user_id, filename, original_name, os.path.splitext(original_name)[0],
          f"image/{os.path.splitext(filename)[1].lower().lstrip('.').replace('jpg', 'jpeg')}",
          size, source, prompt, json.dumps(tags or [], ensure_ascii=False),
          provider or '', model or '', endpoint or '', int(reference_count or 0),
-         str(template_version or ''), _now(), _now()),
+         str(template_version or ''),
+         (str(product_id) if product_id else None),
+         (str(module_key) if module_key else None),
+         (str(request_id) if request_id else None),
+         (str(agent_source) if agent_source else None),
+         _now(), _now()),
     )
     return _row_to_dict(query('SELECT * FROM gallery_assets WHERE id = ?', (asset_id,), one=True))
 
 
 def _save_bytes(data, original_name, source='upload', prompt='', tags=None,
-                provider='', model='', endpoint='', reference_count=0, template_version=''):
+                provider='', model='', endpoint='', reference_count=0, template_version='',
+                product_id=None, module_key=None, request_id=None, agent_source=None,
+                user_id=None):
     if len(data) > Config.MAX_IMAGE_SIZE:
         raise ValueError('图片超过 10MB 限制')
     ext = os.path.splitext(original_name)[1].lower().lstrip('.')
@@ -93,7 +102,10 @@ def _save_bytes(data, original_name, source='upload', prompt='', tags=None,
         file.write(data)
     return _create_asset(filename, _safe_name(original_name), len(data), source, prompt, tags,
                          provider=provider, model=model, endpoint=endpoint,
-                         reference_count=reference_count, template_version=template_version)
+                         reference_count=reference_count, template_version=template_version,
+                         product_id=product_id, module_key=module_key,
+                         request_id=request_id, agent_source=agent_source,
+                         user_id=user_id)
 
 
 @gallery_bp.route('/gallery', methods=['GET'])
@@ -102,10 +114,33 @@ def list_gallery():
     keyword = request.args.get('keyword', '').strip()
     source = request.args.get('source', '').strip()
     favorite = request.args.get('favorite', '').strip()
+    product_id = request.args.get('product_id', '').strip()
+    module_key = request.args.get('module_key', '').strip()
+    request_id = request.args.get('request_id', '').strip()
+    try:
+        from utils.agent_auth import current_agent
+        agent = current_agent()
+    except Exception:
+        agent = None
     user_id = (get_current_user() or {}).get('id')
-    if not user_id:
-        return error_response('请先登录', 401)
-    conditions, params = ['user_id = ?'], [user_id]
+    if agent:
+        # Agent 令牌：按 product_id/module_key/request_id 精确查询（未带过滤条件时只看套图产物）
+        conditions, params = [], []
+        if not (product_id or module_key or request_id or source):
+            conditions.append("agent_source = 'agent-suite'")
+    else:
+        if not user_id:
+            return error_response('请先登录', 401)
+        conditions, params = ['user_id = ?'], [user_id]
+    if product_id:
+        conditions.append('product_id = ?')
+        params.append(product_id)
+    if module_key:
+        conditions.append('module_key = ?')
+        params.append(module_key)
+    if request_id:
+        conditions.append('request_id = ?')
+        params.append(request_id)
     if keyword:
         conditions.append('(title LIKE ? OR original_name LIKE ? OR tags LIKE ? OR prompt LIKE ?)')
         params.extend([f'%{keyword}%'] * 4)
