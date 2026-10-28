@@ -203,6 +203,19 @@ class BuildCardTests(CardTestBase):
         self.assertTrue(any('selling_points_zh' in w for w in result['warnings']))
         self.assertEqual(len(self.calls['generate']), 1)
 
+    def test_card_failure_rolls_back_product(self):
+        """建卡失败（如文案质量门槛）时不能把已创建的商品留成孤儿。"""
+        def boom(product_id, raw_selling_points=None, base_card_id=None):
+            raise ValueError('俄文描述仅 134 词，未达 150 词')
+
+        with patch.object(agent_card_service.card_service, 'generate_card', boom):
+            with self.assertRaises(agent_card_service.AgentValidationError):
+                agent_card_service.build_card(self.payload())
+        self.assertEqual(Product.find_all(), [])
+        # 回滚干净后，同一 external_id 还能正常重建
+        result = agent_card_service.build_card(self.payload())
+        self.assertTrue(result['created'])
+
 
 class RouteContractTests(CardTestBase):
     def setUp(self):
