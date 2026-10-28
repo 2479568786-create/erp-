@@ -209,7 +209,8 @@ def submit_publish_record(record_id):
 
     # 调用发布服务
     try:
-        task = PublishService.create_task(product_id, record.get('platform', 'ozon'))
+        task = PublishService.create_task(product_id, record.get('platform', 'ozon'),
+                                            store_id=record.get('storeId'))
 
         # 更新上架记录状态
         PublishRecord.update(record_id, {

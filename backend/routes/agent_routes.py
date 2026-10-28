@@ -5,7 +5,7 @@
 这里用 require_agent_scope 再做一层 scope 兜底；JWT 管理员同样可调（便于页面排障）。
 审计：成功调用的 agent_ops 由 app 级 after_request 统一写一条（set_agent_audit 补字段）。
 """
-from flask import Blueprint, request
+from flask import Blueprint, jsonify, request
 
 from services import (agent_attributes_service, agent_card_service,
                       agent_images_service, agent_validate_service, copy_lint,
@@ -15,6 +15,39 @@ from utils.agent_auth import current_agent, require_agent_scope, set_agent_audit
 from utils.response import error_response, success_response
 
 agent_bp = Blueprint('agent', __name__)
+
+# R2-Fix3：上游超时/连接中断是可重试的，网关/后端都应回 JSON 并带 retryable，
+# 避免 Agent 拿到 nginx 默认 HTML 页（部署重启期间会出现 502 HTML）。
+_RETRYABLE_MARKERS = (
+    'timed out', 'timeout', 'temporarily', 'connection reset', 'connection aborted',
+    'connection refused', 'remote end closed', 'bad gateway', 'service unavailable',
+    'too many requests', 'rate limit', 'broken pipe',
+)
+
+
+def _is_retryable_upstream(exc):
+    """判断异常是否属于「可重试的上游问题」（超时 / 连接中断 / 502-504 / 429）。"""
+    if isinstance(exc, (TimeoutError, ConnectionError, BrokenPipeError)):
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in _RETRYABLE_MARKERS)
+
+
+def _upstream_error_response(exc, scope_label='请求'):
+    """R2-Fix3：上游超时/中断统一返回 502 JSON；其它异常 500 且 retryable=false。"""
+    if _is_retryable_upstream(exc):
+        return jsonify({
+            'code': 502,
+            'msg': '%s超时或上游中断，请重试：%s' % (scope_label, exc),
+            'data': None,
+            'retryable': True,
+        }), 502
+    return jsonify({
+        'code': 500,
+        'msg': '%s失败：%s' % (scope_label, exc),
+        'data': None,
+        'retryable': False,
+    }), 500
 
 
 @agent_bp.route('/agent/cards/build', methods=['POST'])
@@ -29,6 +62,10 @@ def agent_build_card():
         set_agent_audit(status='invalid', error=str(exc),
                         request_id=str(payload.get('external_id') or ''))
         return error_response(str(exc), 422)
+    except Exception as exc:  # R2-Fix3：上游超时/中断 → 502 JSON(retryable)，其它 → 500 JSON
+        set_agent_audit(status='error', error=str(exc),
+                        request_id=str(payload.get('external_id') or ''))
+        return _upstream_error_response(exc, '建卡')
     set_agent_audit(product_id=result.get('product_id', ''),
                     request_id=str(payload.get('external_id') or ''))
     return success_response(data=result, msg='建卡完成')
@@ -76,6 +113,9 @@ def agent_images_suite():
     except suite_service.AgentSuiteError as exc:
         set_agent_audit(status='invalid', error=str(exc))
         return error_response(str(exc), 422)
+    except Exception as exc:  # R2-Fix3：套图上游超时/中断 → 502 JSON(retryable)
+        set_agent_audit(status='error', error=str(exc))
+        return _upstream_error_response(exc, '套图')
     if not result.get('ok'):
         set_agent_audit(status='partial', error='部分模块失败')
     return success_response(

@@ -182,7 +182,15 @@ def create_app(config_class=Config):
     def server_error(e):
         if app.config.get('DEBUG'):
             raise e
-        return error_response("服务器内部错误", 500)
+        # R2-Fix3：未处理异常统一 JSON，并显式标注 retryable=false（可重试的上游问题
+        # 由各路由返回 502 + retryable=true，不走这里）
+        from flask import jsonify
+        return jsonify({
+            "code": 500,
+            "msg": "服务器内部错误",
+            "data": None,
+            "retryable": False,
+        }), 500
 
     @app.errorhandler(400)
     def bad_request(e):

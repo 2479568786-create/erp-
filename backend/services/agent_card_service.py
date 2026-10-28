@@ -16,6 +16,8 @@ GeekOzon ERP - Agent 一键建卡服务（R2）
 注意：R2 入参是结构化数据，不复用 /api/products/collect 的「市场页数据清洗/合并」逻辑
 （那部分只处理插件抓下来的脏数据），但商品仍走同一个 Product 模型与默认字段。
 """
+import json
+
 from services import card_service
 from db import query
 
@@ -130,7 +132,141 @@ def _build_product_data(payload, external_id):
         data['packageMode'] = _as_text(payload.get('package_mode'))
     if payload.get('store_id') not in (None, ''):
         data['storeId'] = payload.get('store_id')
+    skus = _build_skus(payload.get('skus'), category.get('description_category_id'),
+                       category.get('type_id'))
+    if skus:
+        data['skus'] = skus
     return data
+
+
+# ============================================================
+# R2-Fix2：SKU（至少单 SKU 颜色）支持
+# ============================================================
+COLOR_ATTR_ID = 10096
+COLOR_STANDARD_KEY = '商品颜色（Цвет товара）'
+_COLOR_KEY_HINTS = ('цвет товара', 'цвет', '颜色', 'color', 'colour')
+
+
+def _is_color_key(key):
+    text = str(key or '').strip().lower()
+    return any(hint in text for hint in _COLOR_KEY_HINTS)
+
+
+def _dictionary_color(text, description_category_id=None, type_id=None):
+    """按 Ozon 颜色字典（attribute 10096）解析颜色。
+
+    返回 (value_id, canonical_value, candidates)：
+    - 唯一命中：value_id/canonical_value 有值，candidates 为空；
+    - 未命中或多候选：value_id=None，candidates 返回候选行（供 422 报文）。
+    只认唯一匹配，不做模糊兜底（与 R5 字典口径一致）。
+    """
+    target = _as_text(text)
+    if not target:
+        return None, '', []
+    sql = ("SELECT value_id, value, value_zh, value_ru FROM ozon_attribute_dictionary_values "
+           "WHERE attribute_id = ?")
+    params = [COLOR_ATTR_ID]
+    rows = []
+    try:
+        if description_category_id not in (None, '') and type_id not in (None, ''):
+            rows = query(sql + " AND description_category_id = ? AND type_id = ?",
+                         (COLOR_ATTR_ID, int(description_category_id), int(type_id)))
+        if not rows:
+            rows = query(sql, tuple(params))
+    except Exception:
+        rows = []
+    needle = target.casefold()
+    matched = []
+    for row in rows:
+        names = [str(row.get(key) or '').casefold() for key in ('value', 'value_zh', 'value_ru')]
+        if needle in names:
+            matched.append(row)
+    if len(matched) == 1:
+        row = matched[0]
+        return row.get('value_id'), str(row.get('value') or row.get('value_ru') or ''), []
+    candidates = [{'value_id': (r or {}).get('value_id'), 'value': (r or {}).get('value'),
+                   'value_zh': (r or {}).get('value_zh')} for r in (matched or rows)[:20]]
+    return None, '', candidates
+
+
+def _build_skus(raw_skus, description_category_id=None, type_id=None):
+    """把请求里的 skus[] 映射成 Product.skus[]（combo 键与编辑器一致）。
+
+    每个 SKU 支持：combo（颜色等）、price/old_price/source_price/stock、
+    package_weight_g/length_mm/width_mm/height_mm、image、sku_code（显式货号）。
+    颜色值必须能在 Ozon 字典里唯一命中，否则 422 并把候选带回。
+    """
+    items = _as_list(raw_skus)
+    if not items:
+        return []
+    out = []
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            raise AgentValidationError('skus[%d] 必须是 JSON 对象' % index)
+        combo_raw = item.get('combo')
+        if combo_raw is None:
+            combo_raw = item.get('attributes') or {}
+        if not isinstance(combo_raw, dict):
+            raise AgentValidationError('skus[%d].combo 必须是对象' % index)
+        combo = {}
+        color_value_id = item.get('color_value_id')
+        color_value = _as_text(item.get('color'))
+        for key, value in combo_raw.items():
+            text = _as_text(value)
+            if not text:
+                continue
+            if _is_color_key(key):
+                if color_value_id not in (None, ''):
+                    combo[COLOR_STANDARD_KEY] = text
+                    continue
+                value_id, canonical, candidates = _dictionary_color(
+                    text, description_category_id, type_id)
+                if value_id is None:
+                    raise AgentValidationError(
+                        'skus[%d] 颜色「%s」无法在 Ozon 颜色字典唯一命中，候选：%s'
+                        % (index, text, json.dumps(candidates, ensure_ascii=False)))
+                color_value_id = value_id
+                color_value = canonical or text
+                combo[COLOR_STANDARD_KEY] = color_value
+            else:
+                combo[str(key)] = text
+        if color_value and COLOR_STANDARD_KEY not in combo:
+            value_id, canonical, candidates = _dictionary_color(
+                color_value, description_category_id, type_id)
+            if value_id is None:
+                raise AgentValidationError(
+                    'skus[%d] 颜色「%s」无法在 Ozon 颜色字典唯一命中，候选：%s'
+                    % (index, color_value, json.dumps(candidates, ensure_ascii=False)))
+            color_value_id = value_id
+            combo[COLOR_STANDARD_KEY] = canonical or color_value
+
+        sku = {'combo': combo}
+        if color_value_id not in (None, ''):
+            sku['colorValueId'] = color_value_id
+        for src_key, dst_key in (('price', 'price'), ('old_price', 'oldPrice'),
+                                 ('source_price', 'sourcePrice'), ('stock', 'stock')):
+            if item.get(src_key) not in (None, ''):
+                sku[dst_key] = item.get(src_key)
+        weight = item.get('package_weight_g', item.get('weight_g', item.get('weight')))
+        if weight not in (None, ''):
+            sku['weight'] = weight
+        dims = {}
+        for src_key, field in (('length_mm', 'length'), ('width_mm', 'width'),
+                               ('height_mm', 'height')):
+            if item.get(src_key) not in (None, ''):
+                dims[field] = item.get(src_key)
+        if dims:
+            sku['dimensions'] = dims
+        image = _as_text(item.get('image'))
+        if image:
+            sku['image'] = image
+            sku['images'] = [image]
+        sku_code = _as_text(item.get('sku_code') or item.get('skuCode'))
+        if sku_code:
+            sku['skuCode'] = sku_code
+            sku['offerId'] = sku_code
+        out.append(sku)
+    return out
 
 
 def _required_attributes(description_category_id, type_id):
@@ -350,4 +486,7 @@ def build_card(payload, token_row=None):
         'applied': applied,
         'missing_attributes': missing,
         'warnings': warnings,
+        'sku_count': len(product.get('skus') or []),
+        'sku_ids': [str(s.get('skuCode') or '') for s in (product.get('skus') or [])
+                    if isinstance(s, dict) and s.get('skuCode')],
     }
