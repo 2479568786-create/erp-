@@ -168,8 +168,65 @@ def get_all_config():
             'enabled': p.get('enabled', True),
             'description': p.get('description', ''),
             'has_key': bool(p.get('api_key', '')),
+            'models': _models_with_points(p.get('models'), config),
         }
     return result
+
+
+def _models_with_points(models, config):
+    """模型清单 + 每张点数（前端下拉直接展示单价）。"""
+    billing = (config or {}).get('image_billing') or {}
+    price_map = billing.get('price_points_by_model') or {}
+    default_price = billing.get('price_points_per_image')
+    out = _public_models(models)
+    for item in out:
+        try:
+            points = float(price_map.get(item['id'], default_price))
+        except (TypeError, ValueError):
+            points = 0.0
+        item['points'] = round(points, 4)
+    return out
+
+
+def _public_models(models):
+    """对外暴露的模型清单（不含 key），供前端下拉选择。"""
+    out = []
+    for item in models or []:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get('id') or '').strip()
+        if not model_id:
+            continue
+        out.append({
+            'id': model_id,
+            'label': str(item.get('label') or model_id),
+            'enabled': bool(item.get('enabled', True)),
+            'has_key': bool(str(item.get('api_key') or '').strip()),
+        })
+    return out
+
+
+def get_image_models(provider_key='lingkeai'):
+    """生图模型清单（含每张点数），前后端共用；没有 models 配置时回退单模型。"""
+    config = _load_config()
+    provider = (config.get('providers') or {}).get(provider_key) or {}
+    billing = config.get('image_billing') or {}
+    price_map = billing.get('price_points_by_model') or {}
+    default_price = billing.get('price_points_per_image')
+    models = _public_models(provider.get('models'))
+    if not models and provider.get('model'):
+        models = [{'id': provider.get('model'), 'label': provider.get('model'),
+                   'enabled': True, 'has_key': bool(provider.get('api_key'))}]
+    out = []
+    for item in models:
+        try:
+            points = float(price_map.get(item['id'], default_price))
+        except (TypeError, ValueError):
+            points = 0.0
+        entry = dict(item)
+        entry['points'] = round(points, 4)
+        out.append(entry)
+    return out
 
 
 def update_provider(provider_key, data):

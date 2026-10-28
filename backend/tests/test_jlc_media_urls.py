@@ -37,7 +37,7 @@ class JlcOutputUrlTests(unittest.TestCase):
         status = {'data': {'is_final': True, 'state': 'success', 'cost': 0.1,
                            'input_files': [REFERENCE], 'result_urls': [RESULT]}}
 
-        def fake_request(method, path, body=None, timeout=90):
+        def fake_request(method, path, body=None, timeout=90, **kwargs):
             return submitted if method == 'POST' else status
 
         with patch.object(jlc, '_request', side_effect=fake_request), \

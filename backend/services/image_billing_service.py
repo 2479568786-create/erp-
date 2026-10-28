@@ -49,6 +49,29 @@ def cents_to_points(cents):
 
 # ------------------------------------------------------------------ 单价配置
 
+def _price_map():
+    """按模型单价表（0.37 / 0.2 ...），只保留合法值。"""
+    raw = (_load_config().get('image_billing') or {}).get('price_points_by_model') or {}
+    out = {}
+    for key, value in raw.items():
+        try:
+            price = float(value)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= price <= MAX_PRICE_POINTS:
+            out[str(key)] = round(price, 4)
+    return out
+
+
+def price_for_model(model=None):
+    """按模型取单价；模型没有单独定价时回退全局单价。"""
+    model = str(model or '').strip()
+    prices = _price_map()
+    if model and model in prices:
+        return prices[model]
+    return get_billing_config()['price_points_per_image']
+
+
 def get_billing_config():
     """读取生图计费配置（存放在 backend/data/ai_models.json → image_billing）。"""
     raw = (_load_config().get('image_billing') or {})
@@ -60,6 +83,7 @@ def get_billing_config():
         price = DEFAULT_PRICE_POINTS
     return {
         'price_points_per_image': round(price, 4),
+        'price_points_by_model': _price_map(),
         'currency': raw.get('currency') or 'CNY',
         'unit': '1点=1元',
         'updated_at': raw.get('updated_at') or '',
@@ -167,7 +191,7 @@ def list_accounts_billing():
 
 # ------------------------------------------------------------------ 生图闸门
 
-def can_generate(account, images=1):
+def can_generate(account, images=1, model=None):
     """生图前校验，返回 (allowed, reason)。
 
     ``images`` 是本次请求要生成的张数（ERP 单次最多 4 张）：必须按
@@ -188,7 +212,7 @@ def can_generate(account, images=1):
         images = max(int(images or 1), 1)
     except (TypeError, ValueError):
         images = 1
-    price = get_billing_config()['price_points_per_image']
+    price = price_for_model(model)
     required_cents = points_to_cents(price * images) if price > 0 else 0
     if required_cents > 0 and balance_cents < required_cents:
         return False, ('生图余额不足：本次 %d 张需 %s 点，当前余额 %s 点，'
@@ -214,7 +238,7 @@ def charge(account_id, images, provider='', model='', source='ai'):
         return {'images': images, 'cost_points': 0.0, 'cost_cents': 0,
                 'status': 'account_missing', 'balance_after': None}
 
-    price = get_billing_config()['price_points_per_image']
+    price = price_for_model(model)
     if row.get('role') == ADMIN_ROLE:
         cost_cents, status = 0, 'admin_exempt'
     else:

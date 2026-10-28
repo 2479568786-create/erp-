@@ -29,30 +29,47 @@ class JLCError(Exception):
     """JLC 调用异常"""
 
 
-def _api_key():
-    """复用「AI 生图模块」的凌科 key（ai_models.json 的 lingkeai），不再单独配置一把。"""
+def _provider_config():
+    """读取 lingkeai 提供商配置（含 models 多模型列表，每个模型可挂自己的 key）。"""
     try:
-        from services.ai_config_service import get_ai_config
-        config = get_ai_config('lingkeai') or {}
-        key = str(config.get('api_key') or '').strip()
-        if key:
-            return key
+        from services import ai_config_service
+        config = ai_config_service._load_config()
     except Exception:
-        pass
+        return {}
+    return ((config.get('providers') or {}).get('lingkeai') or {})
+
+
+def model_api_key(model=None):
+    """按模型解析 key：models[] 里同名模型用自己的 key，其次 provider 顶层 api_key。"""
+    provider = _provider_config()
+    model = str(model or '').strip() or str(provider.get('model') or MODEL)
+    for item in provider.get('models') or []:
+        if isinstance(item, dict) and str(item.get('id') or '').strip() == model:
+            key = str(item.get('api_key') or '').strip()
+            if key:
+                return key
+    key = str(provider.get('api_key') or '').strip()
+    if key:
+        return key
     key = (os.environ.get('JLC_API_KEY') or '').strip()
     if key:
         return key
     raise JLCError('凌科 AI 未配置 API Key，请到「模型管理」填写 lingkeai 的 key')
 
 
-def _request(method, path, body=None, timeout=90):
+def _api_key(model=None):
+    """兼容旧调用：等价于 model_api_key(model)。"""
+    return model_api_key(model)
+
+
+def _request(method, path, body=None, timeout=90, model=None):
     payload = json.dumps(body).encode('utf-8') if body is not None else None
     req = urllib.request.Request(
         API_BASE + path,
         data=payload,
         method=method,
         headers={
-            'Authorization': 'Bearer ' + _api_key(),
+            'Authorization': 'Bearer ' + _api_key(model),
             'Content-Type': 'application/json',
         },
     )
@@ -167,7 +184,7 @@ def generate_image(prompt, aspect_ratio='3:4', image_size='2K', images=None,
         params['images'] = refs
     body = {'model': model, 'prompt': prompt, 'params': params}
 
-    submitted = _request('POST', '/v1/media/generate', body)
+    submitted = _request('POST', '/v1/media/generate', body, model=model)
     code = submitted.get('code')
     if code not in (None, 0, 200):
         raise JLCError('提交失败(%s): %s' % (code, submitted.get('msg') or str(submitted)[:200]))
@@ -179,7 +196,7 @@ def generate_image(prompt, aspect_ratio='3:4', image_size='2K', images=None,
 
     deadline = time.time() + timeout
     while time.time() < deadline:
-        status = _request('GET', '/v1/skills/task-status?task_id=%s' % task_id)
+        status = _request('GET', '/v1/skills/task-status?task_id=%s' % task_id, model=model)
         info = status.get('data') or status
         if info.get('is_final'):
             state = (info.get('state') or '').lower()
@@ -187,14 +204,15 @@ def generate_image(prompt, aspect_ratio='3:4', image_size='2K', images=None,
                 urls = _output_urls(info)
                 if not urls:
                     raise JLCError('任务成功但没有取到图片地址')
-                return {'urls': urls, 'task_id': task_id, 'cost': info.get('cost'), 'model': model}
+                return {'urls': urls, 'task_id': task_id, 'cost': info.get('cost'),
+                        'model': info.get('model') or model}
             raise JLCError('任务失败(%s): %s' % (state or 'unknown',
                                                info.get('error_message') or info.get('msg') or ''))
         time.sleep(POLL_INTERVAL)
     raise JLCError('生图超时（%s 秒），任务 %s 仍在进行，稍后可在图库重试' % (timeout, task_id))
 
 
-def balance():
-    """查询当前 Key 余额（算力），用于上线自检。"""
-    data = _request('GET', '/v1/skills/balance')
+def balance(model=None):
+    """查询当前 Key 余额（算力），用于上线自检；传 model 则查该模型那把 key。"""
+    data = _request('GET', '/v1/skills/balance', model=model)
     return data.get('data') or data

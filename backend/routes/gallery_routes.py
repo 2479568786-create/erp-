@@ -265,6 +265,21 @@ def gallery_file(filename):
 
 
 JLC_MODEL = 'banana-2.1'
+
+
+def _resolve_image_model(requested):
+    """把前端选的模型解析成配置里可用的模型 id；未配置/未启用则回退默认。"""
+    requested = str(requested or '').strip()
+    try:
+        from services.ai_config_service import get_image_models
+        allowed = {item['id'] for item in get_image_models('lingkeai') if item.get('enabled')}
+    except Exception:
+        allowed = set()
+    if requested and requested in allowed:
+        return requested
+    return JLC_MODEL
+
+
 JLC_ASPECT = {
     '1024x1024': '1:1',
     '1536x1024': '3:2',
@@ -322,9 +337,10 @@ def generate_ai_images():
     images = reference_images or ([reference_image] if reference_image else [])
     image_size = str(body.get('imageSize') or '2K').strip() or '2K'
     template_version = str(body.get('template_version') or 'single-jlc-v1')
+    selected_model = _resolve_image_model(body.get('model'))
     assets = []
     errors = []
-    model_used = JLC_MODEL
+    model_used = selected_model
     watermark_status = 'not_configured'
     for index in range(count):
         try:
@@ -333,11 +349,12 @@ def generate_ai_images():
                 aspect_ratio=JLC_ASPECT.get(size, '3:4'),
                 image_size=image_size,
                 images=images,
+                model=selected_model,
             )
         except Exception as exc:  # noqa: BLE001 - 统一回可读错误
             errors.append(str(exc)[:180])
             break
-        model_used = result.get('model') or JLC_MODEL
+        model_used = result.get('model') or selected_model
         for url_index, url in enumerate(result.get('urls') or [], start=1):
             try:
                 image_data = _download_generated_image(url)
@@ -387,6 +404,7 @@ def generate_jlc_suite_image():
     aspect_ratio = str(body.get('aspectRatio') or '3:4').strip()
     image_size = str(body.get('imageSize') or '2K').strip()
     module_key = str(body.get('moduleKey') or '').strip()
+    selected_model = _resolve_image_model(body.get('model'))
     images = body.get('images') or []
     if not isinstance(images, list):
         return error_response('images 必须是数组')
@@ -399,7 +417,8 @@ def generate_jlc_suite_image():
 
     try:
         result = jlc_media_service.generate_image(
-            prompt, aspect_ratio=aspect_ratio, image_size=image_size, images=images)
+            prompt, aspect_ratio=aspect_ratio, image_size=image_size, images=images,
+            model=selected_model)
     except Exception as exc:  # noqa: BLE001 - 统一回可读错误
         return error_response('JLC 生图失败：%s' % exc)
 
@@ -418,7 +437,7 @@ def generate_jlc_suite_image():
                 prompt,
                 ['AI套图'] + ([module_key] if module_key else []),
                 provider='jlc',
-                model=result.get('model') or JLC_MODEL,
+                model=result.get('model') or selected_model,
                 endpoint='/v1/media/generate',
                 reference_count=len(images),
                 template_version='suite-manual-%s' % (module_key or 'img'),

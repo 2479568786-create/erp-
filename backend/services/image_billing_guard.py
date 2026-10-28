@@ -27,6 +27,25 @@ IMAGE_ENDPOINTS = {
 }
 
 _CHARGED_FLAG = '_image_billing_charged'
+DEFAULT_IMAGE_MODEL = 'banana-2.1'
+
+
+def _requested_model():
+    """本次请求选的生图模型（前端下拉传 model），缺省用 banana-2.1。"""
+    try:
+        body = request.get_json(silent=True) or {}
+        model = str(body.get('model') or '').strip()
+    except Exception:
+        model = ''
+    return model or DEFAULT_IMAGE_MODEL
+
+
+def _response_model(response):
+    try:
+        payload = response.get_json(silent=True) or {}
+        return str((payload.get('data') or {}).get('model') or '').strip()
+    except Exception:
+        return ''
 
 
 def _requested_count(rule):
@@ -61,7 +80,8 @@ def register_image_billing_guard(app):
             return None
         try:
             user = get_current_user()
-            allowed, reason = billing.can_generate(user, images=_requested_count(rule))
+            model = _requested_model()
+            allowed, reason = billing.can_generate(user, images=_requested_count(rule), model=model)
         except Exception as exc:  # 计费不可用时不阻断出图
             print(f'[生图计费] 预检异常，本次放行：{exc}')
             return None
@@ -69,6 +89,7 @@ def register_image_billing_guard(app):
             return error_response(reason, 403)
         try:
             g.user_id_for_billing = (user or {}).get('id')
+            g.image_model_for_billing = model
         except Exception:
             pass
         return None
@@ -88,11 +109,14 @@ def register_image_billing_guard(app):
             assets = _assets_in(response)
             if not assets:
                 return response
+            model = (_response_model(response) or getattr(g, 'image_model_for_billing', '')
+                     or DEFAULT_IMAGE_MODEL)
             info = billing.charge(user_id, len(assets), provider='lingkeai',
-                                  model='banana-2.1', source='ai')
+                                  model=model, source='ai')
             setattr(g, _CHARGED_FLAG, True)
-            print('[生图计费] 账号 %s 出图 %d 张，扣 %s 点，余 %s 点'
-                  % (user_id, len(assets), info.get('cost_points'), info.get('balance_after')))
+            print('[生图计费] 账号 %s 出图 %d 张（%s），扣 %s 点，余 %s 点'
+                  % (user_id, len(assets), model, info.get('cost_points'),
+                     info.get('balance_after')))
         except Exception as exc:
             print(f'[生图计费] 扣点异常：{exc}')
         return response
