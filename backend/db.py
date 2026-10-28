@@ -207,6 +207,52 @@ def _migrate_research_owner_ids(conn):
     conn.commit()
 
 
+def _migrate_agent_tokens(conn):
+    """Agent 服务令牌 + 审计（R1/R9）：令牌只存 hash，审计不存请求体全文。"""
+    conn.execute("""CREATE TABLE IF NOT EXISTS agent_tokens (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        name         TEXT NOT NULL,
+        token_hash   TEXT NOT NULL UNIQUE,
+        scopes       TEXT NOT NULL,
+        created_at   TEXT NOT NULL,
+        expires_at   TEXT,
+        last_used_at TEXT,
+        revoked      INTEGER NOT NULL DEFAULT 0
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_tokens_revoked ON agent_tokens(revoked)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS agent_ops (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_id    INTEGER,
+        scope       TEXT NOT NULL DEFAULT '',
+        action      TEXT NOT NULL DEFAULT '',
+        product_id  TEXT NOT NULL DEFAULT '',
+        request_id  TEXT NOT NULL DEFAULT '',
+        status      TEXT NOT NULL DEFAULT 'ok',
+        duration_ms INTEGER NOT NULL DEFAULT 0,
+        error       TEXT NOT NULL DEFAULT '',
+        created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_ops_product ON agent_ops(product_id, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_ops_token ON agent_ops(token_id, created_at)")
+    conn.commit()
+
+
+def _migrate_gallery_agent_columns(conn):
+    """图库标注列（R3）：套图产物可按产品/模块/请求号精确查询。"""
+    existing = {row['name'] for row in conn.execute("PRAGMA table_info(gallery_assets)")}
+    for name, ddl in (
+        ('product_id', "ALTER TABLE gallery_assets ADD COLUMN product_id TEXT"),
+        ('module_key', "ALTER TABLE gallery_assets ADD COLUMN module_key TEXT"),
+        ('request_id', "ALTER TABLE gallery_assets ADD COLUMN request_id TEXT"),
+        ('agent_source', "ALTER TABLE gallery_assets ADD COLUMN agent_source TEXT"),
+    ):
+        if name not in existing:
+            conn.execute(ddl)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_gallery_assets_product ON gallery_assets(product_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_gallery_assets_request ON gallery_assets(request_id, module_key)")
+    conn.commit()
+
+
 def _run_migrations(conn):
     """执行增量数据库迁移（幂等：列已存在时跳过）"""
     # 迁移0：accounts 表角色扩展（支持 salesperson 业务员角色）
@@ -225,6 +271,12 @@ def _run_migrations(conn):
 
     # 迁移0.8：选品池 owner_ids 列（历史手工列，补齐迁移避免新库缺列）
     _migrate_research_owner_ids(conn)
+
+    # 迁移0.9：Agent 服务令牌 + 审计表（R1/R9）
+    _migrate_agent_tokens(conn)
+
+    # 迁移0.10：图库标注列（product_id/module_key/request_id/agent_source）
+    _migrate_gallery_agent_columns(conn)
 
     # 迁移1：ozon_attribute_dictionary_values 添加 description_category_id 和 type_id 列
     # 原因：dictionary_id 在 Ozon 中可能被多个类目共享（如"类型"属性），

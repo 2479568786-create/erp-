@@ -39,7 +39,15 @@ def create_app(config_class=Config):
     )
     app.config.from_object(config_class)
 
+    # Agent 服务令牌（R1）：仅对白名单路径生效，JWT 优先；无 pepper 时 fail-closed。
+    # 必须注册在 require_api_auth 之前：通过校验后 require_api_auth 会跳过该请求。
+    from utils.agent_auth import (agent_audit_after_request, agent_request_guard,
+                                  pepper_configured)
+    app.before_request(agent_request_guard)
+    app.after_request(agent_audit_after_request)
     app.before_request(require_api_auth)
+    if not pepper_configured():
+        print('[安全警告] AGENT_TOKEN_PEPPER 未配置：Agent 服务令牌接口将返回 503（JWT 登录不受影响）')
 
     # 初始化数据库
     init_db()

@@ -119,6 +119,14 @@ class Config:
     OSS_BUCKET = os.environ.get('OSS_BUCKET', '')
     OSS_ENDPOINT = os.environ.get('OSS_ENDPOINT', '')
 
+    # ===== Agent 服务令牌（R1）=====
+    # pepper：token 哈希加盐，必填（缺失时 Agent 接口 fail-closed，返回 503）
+    AGENT_TOKEN_PEPPER = os.environ.get('AGENT_TOKEN_PEPPER', '')
+    # 每令牌每分钟请求上限；<=0 关闭限流
+    AGENT_MAX_RPM = int(os.environ.get('AGENT_MAX_RPM', '60') or '60')
+    # 套图批量默认并发（R3）
+    SUITE_CONCURRENCY = int(os.environ.get('SUITE_CONCURRENCY', '2') or '2')
+
     # ===== 价格换算配置 =====
     # 采集 1688 商品时，货源价为人民币(CNY)
     # 根据店铺合同币种自动选择汇率：

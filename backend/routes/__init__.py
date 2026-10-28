@@ -39,6 +39,7 @@ from routes.jlc_ext_routes import jlc_ext_bp
 from routes.ozon_collect_routes import ozon_collect_bp
 from routes.market_intelligence_routes import market_intelligence_bp
 from routes.image_billing_routes import image_billing_bp
+from routes.agent_routes import agent_bp
 
 try:
     from routes.ad_monitor_routes import ad_monitor_bp
@@ -99,3 +100,4 @@ def register_blueprints(app):
     app.register_blueprint(jlc_ext_bp)
     app.register_blueprint(ozon_collect_bp)
     app.register_blueprint(image_billing_bp, url_prefix='/api')
+    app.register_blueprint(agent_bp, url_prefix='/api')

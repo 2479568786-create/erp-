@@ -11,7 +11,7 @@ GeekOzon ERP - 认证与权限工具
 import secrets
 import time
 from functools import wraps
-from flask import request
+from flask import g, request
 
 from db import query, execute
 from utils.response import error_response
@@ -30,7 +30,10 @@ def require_api_auth():
     """Require a valid login token for API routes except public entry points.
 
     插件端点（/api/ext/*）由各路由内部用 X-Ext-Key 自行鉴权，跳过全局登录校验。
+    Agent 服务令牌（/api/* 白名单路径）已在 utils.agent_auth 里校验通过，这里放行。
     """
+    if getattr(g, 'agent_token', None):
+        return None
     if not request.path.startswith('/api/') or request.method == 'OPTIONS':
         return None
     if request.path in _PUBLIC_API_PATHS:
