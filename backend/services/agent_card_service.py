@@ -305,6 +305,16 @@ def build_card(payload, token_row=None):
         if fallback:
             warnings.append('部分卡片字段未找到对应属性，已写入 pendingCardDescription/pendingCardTags 兜底')
         card_row = card_service.get_card(card_row['id']) or card_row
+        # R7：生成卡后自动跑文案越界检查，把风险放进 warnings
+        try:
+            from services import copy_lint
+
+            lint_result = copy_lint.lint_card(card_row, product=product)
+            for violation in lint_result.get('violations') or []:
+                warnings.append('文案风险[%s] %s：%s' % (
+                    violation.get('rule'), violation.get('field'), violation.get('message')))
+        except Exception:
+            pass
 
     required = _required_attributes(
         (payload.get('category') or {}).get('description_category_id'),

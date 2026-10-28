@@ -1,0 +1,177 @@
+{
+  "version": 1,
+  "description": "文案越界规则（R7）：品牌词/正品宣称/促销词/联系方式/中文乱码/长度。品牌白名单与自有品牌在运行时按商品补齐。",
+  "rules": [
+    {
+      "code": "BRAND",
+      "severity": "warning",
+      "fields": [
+        "title",
+        "description",
+        "tags"
+      ],
+      "description": "出现非本商品的品牌名（无品牌白名单除外）",
+      "fix": "删除标签/文案中的品牌词，或确认商品真实品牌后再填"
+    },
+    {
+      "code": "ORIGINAL_CLAIM",
+      "severity": "warning",
+      "fields": [
+        "title",
+        "description",
+        "tags"
+      ],
+      "regex": "(?i)(оригинал\\w*|100\\s*%\\s*оригинал|原装正品|正品保证)"
+    },
+    {
+      "code": "PROMO",
+      "severity": "warning",
+      "fields": [
+        "title",
+        "description",
+        "tags"
+      ],
+      "regex": "(?i)(скидк\\w*|акци\\w*|распродаж\\w*|дешев\\w*|выгодн\\w*|эконом\\w*|лучш\\w*\\s*[_\\-\\s]?\\s*цена|хит\\w*\\s*[_\\-\\s]?\\s*продаж|подарок|бесплатн\\w*|новинк\\w*|супер[_\\-\\s]?цена)"
+    },
+    {
+      "code": "CONTACT",
+      "severity": "warning",
+      "fields": [
+        "title",
+        "description",
+        "tags"
+      ],
+      "regex": "(?i)(https?://|tel:|whatsapp|telegram|t\\.me/|@[A-Za-z0-9_]{4,})"
+    },
+    {
+      "code": "CJK",
+      "severity": "warning",
+      "fields": [
+        "title",
+        "description",
+        "tags"
+      ],
+      "regex": "[\\u4e00-\\u9fff]+",
+      "description": "俄语 listing 中出现中文"
+    }
+  ],
+  "limits": {
+    "title_max_chars": 200,
+    "tags_max_count": 30,
+    "tag_max_chars": 30
+  },
+  "brand_whitelist": [
+    "无品牌",
+    "нет бренда",
+    "no brand",
+    "none",
+    "copy",
+    "без бренда"
+  ],
+  "tags_attribute_id": 23171,
+  "brand_attribute_ids": [
+    85
+  ],
+  "brand_attribute_keywords": [
+    "бренд",
+    "品牌",
+    "brand"
+  ],
+  "brand_lexicon": [
+    "acer",
+    "adidas",
+    "amd",
+    "anker",
+    "anycubic",
+    "apple",
+    "arduino",
+    "artillery",
+    "asus",
+    "bambu",
+    "bambu lab",
+    "baseus",
+    "be quiet",
+    "bosch",
+    "braun",
+    "brother",
+    "canon",
+    "cerave",
+    "columbia",
+    "cooler master",
+    "corsair",
+    "creality",
+    "crucial",
+    "d-link",
+    "dewalt",
+    "dyson",
+    "e sun",
+    "elegoo",
+    "ender",
+    "epson",
+    "espressif",
+    "esun",
+    "garnier",
+    "gigabyte",
+    "gillette",
+    "hatchbox",
+    "hoco",
+    "honor",
+    "huawei",
+    "hyperx",
+    "intel",
+    "iphone",
+    "jbl",
+    "joyroom",
+    "kingroon",
+    "kingston",
+    "konica",
+    "kyocera",
+    "lenovo",
+    "logitech",
+    "makita",
+    "mikrotik",
+    "milwaukee",
+    "minolta",
+    "msi",
+    "netgear",
+    "nike",
+    "nivea",
+    "nvidia",
+    "oral-b",
+    "overture",
+    "panasonic",
+    "philips",
+    "polymaker",
+    "prusa",
+    "prusament",
+    "puma",
+    "qidi",
+    "raspberry",
+    "raspberry pi",
+    "razer",
+    "reebok",
+    "ricoh",
+    "romoss",
+    "samsung",
+    "sandisk",
+    "seagate",
+    "sharp",
+    "sony",
+    "sovol",
+    "steelseries",
+    "stm32",
+    "sunlu",
+    "tefal",
+    "texas instruments",
+    "torras",
+    "toshiba",
+    "tp-link",
+    "ugreen",
+    "uniqlo",
+    "western digital",
+    "wiwu",
+    "xerox",
+    "xiaomi",
+    "zara"
+  ]
+}

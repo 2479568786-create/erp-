@@ -8,7 +8,8 @@
 from flask import Blueprint, request
 
 from services import (agent_attributes_service, agent_card_service,
-                      agent_images_service, agent_validate_service, suite_service)
+                      agent_images_service, agent_validate_service, copy_lint,
+                      suite_service)
 from services.agent_card_service import AgentValidationError
 from utils.agent_auth import current_agent, require_agent_scope, set_agent_audit
 from utils.response import error_response, success_response
@@ -116,3 +117,75 @@ def agent_validate_product(product_id):
         return error_response(str(exc), 404)
     return success_response(data=result,
                             msg='校验通过' if result['ok'] else '发现 %d 个阻断项' % len(result['blocking']))
+
+
+@agent_bp.route('/agent/cards/<card_id>/lint', methods=['POST'])
+@require_agent_scope('cards:write')
+def agent_card_lint(card_id):
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return error_response('请求体必须是 JSON 对象', 400)
+    set_agent_audit()
+    try:
+        result = copy_lint.lint_target(card_id, payload)
+    except ValueError as exc:
+        set_agent_audit(status='invalid', error=str(exc))
+        return error_response(str(exc), 404)
+    set_agent_audit(status='ok' if result.get('ok') else 'warning',
+                    error='' if result.get('ok') else '%d 条文案风险' % len(result.get('violations') or []))
+    return success_response(data=result,
+                            msg='文案检查通过' if result.get('ok')
+                            else '发现 %d 条文案风险' % len(result.get('violations') or []))
+
+
+@agent_bp.route('/agent/ops', methods=['GET'])
+@require_agent_scope('agent:read')
+def agent_ops_list():
+    """R9：Agent 调用审计查询（Agent 令牌 agent:read 或 JWT 管理员）。"""
+    from db import query as _query
+
+    product_id = (request.args.get('product_id') or '').strip()
+    token_id = (request.args.get('token_id') or '').strip()
+    scope = (request.args.get('scope') or '').strip()
+    status = (request.args.get('status') or '').strip()
+    request_id = (request.args.get('request_id') or '').strip()
+    since = (request.args.get('since') or '').strip()
+    try:
+        limit = min(max(int(request.args.get('limit') or 50), 1), 500)
+    except (TypeError, ValueError):
+        limit = 50
+
+    conditions = []
+    params = []
+    if product_id:
+        conditions.append('product_id = ?')
+        params.append(product_id)
+    if request_id:
+        conditions.append('request_id = ?')
+        params.append(request_id)
+    if token_id.isdigit():
+        conditions.append('token_id = ?')
+        params.append(int(token_id))
+    if scope:
+        conditions.append('scope = ?')
+        params.append(scope)
+    if status:
+        conditions.append('status = ?')
+        params.append(status)
+    if since:
+        conditions.append('created_at >= ?')
+        params.append(since)
+    where = (' WHERE ' + ' AND '.join(conditions)) if conditions else ''
+    rows = _query(
+        'SELECT id, token_id, scope, action, product_id, request_id, status, duration_ms, error, created_at'
+        ' FROM agent_ops' + where + ' ORDER BY id DESC LIMIT ?',
+        tuple(params + [limit]),
+    )
+    total = _query('SELECT COUNT(*) AS c FROM agent_ops' + where, tuple(params), one=True)
+    set_agent_audit(status='ok')
+    return success_response(data={
+        'items': [dict(row) for row in rows],
+        'total': int((total or {}).get('c') or 0),
+        'filters': {'product_id': product_id, 'request_id': request_id, 'token_id': token_id,
+                    'scope': scope, 'status': status, 'since': since, 'limit': limit},
+    }, msg='共 %d 条审计' % len(rows))

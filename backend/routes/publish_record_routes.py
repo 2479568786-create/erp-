@@ -322,3 +322,32 @@ def batch_submit_publish_records():
 
     return success_response(data={"results": results, "count": len(results)},
                            msg=f"已提交 {len(results)} 条记录")
+
+
+@publish_record_bp.route('/publish-records/<record_id>/diagnosis', methods=['GET'])
+@handle_errors
+def get_publish_record_diagnosis(record_id):
+    """发布失败/警告归因（R8）：把 Ozon 俄语报错映射成结构化字段与修复建议。"""
+    record = PublishRecord.find_by_id(record_id)
+    if not record:
+        return error_response('上架记录不存在', 404)
+    agent = None
+    try:
+        from utils.agent_auth import current_agent
+
+        agent = current_agent()
+    except Exception:
+        agent = None
+    if not agent:
+        denied = _record_store_allowed(get_current_user(), record)
+        if denied:
+            return denied
+    from services.publish_diagnosis import diagnose_record
+
+    result = diagnose_record(record)
+    result['record_id'] = record.get('id')
+    result['status'] = record.get('status')
+    result['product_id'] = record.get('productId')
+    msg = ('全部告警均已归因' if not result['unknown']
+           else '已归因 %d 条，另有 %d 条原文进 unknown' % (len(result['items']), len(result['unknown'])))
+    return success_response(data=result, msg=msg)
