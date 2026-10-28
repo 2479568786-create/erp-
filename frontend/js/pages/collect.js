@@ -3576,7 +3576,12 @@ function renderSkuImageList(skuIndex, images) {
   html += '</div>';
 
   if (images.length === 0) {
-    html = `<div class="sku-image-gallery">
+    html = `<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
+      <button type="button" class="btn btn-sm btn-secondary" onclick="openSkuImageEdit(${skuIndex})"><i data-lucide="wand-sparkles" style="width:14px;height:14px;"></i> AI整套改图</button>
+      <button type="button" class="btn btn-sm btn-primary" onclick="openSkuReferenceSuite(${skuIndex})"><i data-lucide="images" style="width:14px;height:14px;"></i> AI参考图生成套图</button>
+      <span style="font-size:12px;color:var(--text-tertiary);">这个 SKU 还没有图：可上传参考图直接生成整套，再审核追加</span>
+    </div>
+    <div class="sku-image-gallery">
       <div class="sku-image-card sku-add-card" onclick="addSkuImage(${skuIndex}, event)">
         <div class="card-preview">
           <div class="add-plus-icon">
@@ -3741,6 +3746,61 @@ async function generateSkuImageEditCandidate(state, index, provider) {
   return result.data.assets[0].url;
 }
 
+/** 选择本次生图/水印所属店铺（collect.js 自带实现；返回 store.id 字符串或 null）。 */
+async function selectWatermarkStoreForGeneration(title) {
+  let stores = window._cachedStores || [];
+  if (!stores.length) {
+    try {
+      const response = await Api.getStores();
+      stores = response?.code === 200 ? (response.data?.list || []) : [];
+      window._cachedStores = stores;
+    } catch (e) {
+      stores = [];
+    }
+  }
+  if (!stores.length) {
+    Toast.show('当前账号没有可用店铺，请先在「店铺管理」绑定', 'warning');
+    return null;
+  }
+  if (stores.length === 1) return String(stores[0].id);
+  return new Promise(resolve => {
+    window._pendingWatermarkStoreResolve = resolve;
+    Modal.show({
+      title: title || '选择店铺',
+      body: `<div style="padding:4px;">
+        <label class="form-label">本次生图 / 水印所属店铺</label>
+        <select id="watermarkStorePick" class="form-select">
+          ${stores.map(store => `<option value="${escapeAttr(String(store.id))}">${escapeHtml(store.alias || store.store_id || String(store.id))}</option>`).join('')}
+        </select>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;">
+          <button type="button" class="btn btn-ghost" onclick="cancelWatermarkStorePick()">取消</button>
+          <button type="button" class="btn btn-primary" onclick="confirmWatermarkStorePick()">使用该店铺</button>
+        </div>
+      </div>`,
+      onClose: () => {
+        const resolvePending = window._pendingWatermarkStoreResolve;
+        window._pendingWatermarkStoreResolve = null;
+        if (resolvePending) resolvePending(null);
+      },
+    });
+  });
+}
+
+function confirmWatermarkStorePick() {
+  const value = document.getElementById('watermarkStorePick')?.value || '';
+  const resolvePending = window._pendingWatermarkStoreResolve;
+  window._pendingWatermarkStoreResolve = null;
+  Modal.close();
+  if (resolvePending) resolvePending(value || null);
+}
+
+function cancelWatermarkStorePick() {
+  const resolvePending = window._pendingWatermarkStoreResolve;
+  window._pendingWatermarkStoreResolve = null;
+  Modal.close();
+  if (resolvePending) resolvePending(null);
+}
+
 async function resolveSkuWatermarkStoreId() {
   const product = window._editingProduct || {};
   let stores = window._cachedStores || [];
@@ -3838,7 +3898,6 @@ function applySkuImageEditApprovals() {
 const SKU_REFERENCE_PROMPT_PURPOSES = ['主图', '细节展示', '使用场景', '结构特写', '配件展示', '尺寸比例展示', '多角度展示', '卖点场景展示'];
 async function openSkuReferenceSuite(skuIndex) {
   const images = window._skuImages?.[skuIndex] || [];
-  if (!images.length) return Toast.show('当前 SKU 没有可用的参考图片', 'warning');
   if (!window._editSessionId) return Toast.show('请在商品编辑窗口中使用 AI 参考图生成', 'warning');
   const models = await Api.getAIModels();
   if (models?.code !== 200) return Toast.show(models?.msg || '读取模型配置失败', 'error');
@@ -3847,11 +3906,19 @@ async function openSkuReferenceSuite(skuIndex) {
     .filter(key => providers[key]?.enabled && providers[key]?.has_key && providers[key]?.base_url)
     .map(key => ({ key, name: providers[key].name || key, model: providers[key].model || '' }));
   if (!available.length) return Toast.show('请先在模型管理中启用并配置凌科 AI（LingkeAI）', 'warning');
+  const lingkeaiProvider = providers.lingkeai || {};
+  const providerModelList = (Array.isArray(lingkeaiProvider.models) ? lingkeaiProvider.models : [])
+    .filter(item => item && item.id && item.enabled !== false && item.has_key !== false)
+    .map(item => ({ id: item.id, label: item.label || item.id, points: Number(item.points || 0) }));
+  const suiteModelOptions = providerModelList.length ? providerModelList : [
+    { id: 'banana-2.1', label: '香蕉 2.1', points: 0.37 },
+    { id: 'tt-image-2', label: 'TT Image 2', points: 0.2 },
+  ];
   const state = {
     skuIndex, sessionId: window._editSessionId, originals: images.slice(), selected: new Set(),
     uploaded: [],
     mode: 'manual', count: 7, brief: '', prompts: [], results: [], providers: available,
-    providerKey: available[0].key, visualAnalysis: null, visualAnalysisFingerprint: '', visualAnalysisImageCount: 0, running: false, cancelRequested: false,
+    providerKey: available[0].key, models: suiteModelOptions, modelId: suiteModelOptions[0].id, visualAnalysis: null, visualAnalysisFingerprint: '', visualAnalysisImageCount: 0, running: false, cancelRequested: false,
   };
   window._skuReferenceSuiteState = state;
   Modal.show({
@@ -3878,7 +3945,15 @@ function renderSkuReferenceSuiteSetup(state) {
         </div>
         <input id="skuRefUploadInput" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden onchange="addSkuReferenceUploads(this.files)">
         ${state.uploaded.length ? `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:8px;margin-bottom:10px;">${state.uploaded.map((item, index) => `<div style="position:relative;padding:4px;border:2px solid var(--primary-color,#2563EB);border-radius:8px;background:var(--bg-card);"><img src="${escapeAttr(item.dataUrl)}" alt="上传图 ${index + 1}" style="width:100%;aspect-ratio:1;object-fit:contain;background:#f6f6f6;border-radius:5px;"><button type="button" onclick="removeSkuReferenceUpload(${index})" style="position:absolute;top:2px;right:2px;border:none;background:rgba(0,0,0,.55);color:#fff;border-radius:50%;width:18px;height:18px;line-height:1;cursor:pointer;">×</button><span style="font-size:11px;">上传图 ${index + 1}</span></div>`).join('')}</div>` : ''}
-        <p style="color:var(--text-secondary);font-size:12px;">商品采集图已选 ${state.selected.size}/${state.originals.length} 张；上传的 ${state.uploaded.length} 张会一并作为参考图（最多 6 张）。生成固定调用凌科 AI（LingkeAI）。</p>
+        <p style="color:var(--text-secondary);font-size:12px;">商品采集图已选 ${state.selected.size}/${state.originals.length} 张；上传的 ${state.uploaded.length} 张会一并作为参考图（最多 6 张）。</p>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
+          <label style="font-size:12px;">生成模型
+            <select id="skuReferenceModel" class="form-select" style="width:auto;display:inline-block;margin-left:6px;" onchange="updateSkuReferenceModel(this.value)">
+              ${state.models.map(item => `<option value="${escapeAttr(item.id)}" ${item.id === state.modelId ? 'selected' : ''}>${escapeHtml(item.label)} · ${Number(item.points || 0)} 点/张</option>`).join('')}
+            </select>
+          </label>
+          <span style="font-size:12px;color:var(--text-secondary);">按所选模型逐张计费（1 点 = 1 元）</span>
+        </div>
         <div style="margin-bottom:8px;"><button type="button" class="btn btn-sm btn-secondary" onclick="toggleAllSkuReferenceImages()">${state.selected.size === state.originals.length ? '取消全选' : '全选图片'}</button></div>
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:8px;">${state.originals.map((url, index) => {
           const checked = state.selected.has(index);
@@ -3887,23 +3962,17 @@ function renderSkuReferenceSuiteSetup(state) {
             <span style="font-size:11px;">${checked ? '✓ 已选' : `图片 ${index + 1}`}</span></button>`;
         }).join('')}</div>
       </section>
-      <section><b>2. 提示词方式</b>
-        <label class="form-label" for="skuReferenceBrief">'每张图的提示词（一行一条；只写一条则按张数复制）'</label>
+      <section><b>2. 提示词（业务员填写）</b>
+        <label class="form-label" for="skuReferenceBrief">一行一条，每行生成一张；只写一条则按张数复制</label>
         <textarea id="skuReferenceBrief" class="form-input" rows="3" placeholder="例如：突出产品真实结构，画面简洁，适合 Ozon 商品页">${escapeHtml(state.brief)}</textarea>
         <div style="display:flex;gap:12px;align-items:center;margin-top:10px;flex-wrap:wrap;">
           <label>生成张数 <select id="skuReferenceCount" class="form-select" style="width:auto;display:inline-block;" onchange="updateSkuReferenceControls()">${countOptions}</select></label>
         </div>
         ${remaining < 1 ? `<p style="color:#b45309;">当前 SKU 仅剩 ${remaining} 个图片位，无法按所选模式生成，请先整理图片。</p>` : ''}
       </section>
-      ${state.prompts.length ? `<section><b>3. 提示词预览（${state.prompts.length} 张，可编辑）</b>
-        <div style="display:grid;gap:8px;margin-top:8px;">${state.prompts.map((item, index) => `<div style="border:1px solid var(--border-color);border-radius:8px;padding:10px;">
-          <label class="form-label">${index + 1}. ${escapeHtml(item.purpose || SKU_REFERENCE_PROMPT_PURPOSES[index] || '商品展示')}</label>
-          <textarea class="form-input" rows="3" oninput="updateSkuReferencePrompt(${index},this.value)">${escapeHtml(item.prompt || '')}</textarea></div>`).join('')}</div>
-      </section>` : ''}
       <div style="display:flex;justify-content:flex-end;gap:8px;position:sticky;bottom:0;background:var(--bg-card);padding:8px 0;">
         <button type="button" class="btn btn-ghost" onclick="Modal.close()">取消</button>
-        <button type="button" class="btn btn-secondary" onclick="generateSkuReferencePrompts()">${state.prompts.length ? '重新生成提示词' : '生成提示词'}</button>
-        ${state.prompts.length ? `<button type="button" class="btn btn-primary" onclick="startSkuReferenceSuiteGeneration()">开始生成图片</button>` : ''}
+        <button type="button" class="btn btn-primary" onclick="startSkuReferenceSuiteFromBrief()">开始生图（${state.count} 张）</button>
       </div>
     </div>`;
   if (window.lucide) window.lucide.createIcons();
@@ -4051,14 +4120,14 @@ function mergeSkuVisualAnalyses(results) {
   };
 }
 
-async function generateSkuReferencePrompts() {
-  // 人工写提示词：一行一条；只写一条时按张数复制；不再调用 DeepSeek 规划。
+async function startSkuReferenceSuiteFromBrief() {
+  // 业务员自己写提示词，点「开始生图」直接按这些提示词出图；ERP 不再生成或改写提示词。
   const state = window._skuReferenceSuiteState;
   if (!state || state.running) return;
   state.brief = (document.getElementById('skuReferenceBrief')?.value || '').trim();
   state.count = Number(document.getElementById('skuReferenceCount')?.value || state.count);
   if (!state.selected.size && !state.uploaded.length) return Toast.show('请先上传参考图或勾选商品采集图', 'warning');
-  if (!state.brief) return Toast.show('请先写提示词', 'warning');
+  if (!state.brief) return Toast.show('请先填写提示词', 'warning');
   const remaining = Math.max(0, 30 - (window._skuImages?.[state.skuIndex]?.length || 0));
   if (state.count > remaining) return Toast.show(`当前 SKU 只剩 ${remaining} 个图片位，请先删除图片或减少数量`, 'warning');
   const lines = state.brief.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
@@ -4068,10 +4137,18 @@ async function generateSkuReferencePrompts() {
     purpose: SKU_REFERENCE_PROMPT_PURPOSES[index] || `图片 ${index + 1}`,
     prompt: lines.length === 1 ? lines[0] : (lines[index] || lines[lines.length - 1]),
   }));
-  renderSkuReferenceSuiteSetup(state);
+  await startSkuReferenceSuiteGeneration();
+}
+
+function updateSkuReferenceModel(value) {
+  const state = window._skuReferenceSuiteState;
+  if (!state) return;
+  const model = state.models?.find(item => item.id === value);
+  if (model) state.modelId = model.id;
 }
 
 async function startSkuReferenceSuiteGeneration() {
+  const state = window._skuReferenceSuiteState;
   if (!state || state.running || state.sessionId !== window._editSessionId) return;
   state.count = Number(document.getElementById('skuReferenceCount')?.value || state.count);
   if (state.count !== state.prompts.length) return Toast.show('生成张数已变化，请重新生成对应数量的提示词', 'warning');
@@ -4082,7 +4159,8 @@ async function startSkuReferenceSuiteGeneration() {
   });
   if (!state.prompts.length || state.prompts.some(item => !item.prompt)) return Toast.show('请检查提示词，不可留空', 'warning');
   const provider = state.providers.find(item => item.key === state.providerKey);
-  if (!provider?.model) return Toast.show('当前图片模型未配置 Model ID', 'warning');
+  const effectiveModel = state.modelId || provider?.model;
+  if (!effectiveModel) return Toast.show('当前图片模型未配置 Model ID', 'warning');
   const storeId = await resolveSkuWatermarkStoreId();
   if (!storeId) return;
   state.running = true;
@@ -4107,7 +4185,7 @@ async function startSkuReferenceSuiteGeneration() {
       if (progress) progress.textContent = `正在生成第 ${index + 1}/${state.results.length} 张…`;
       try {
         const result = await Api.generateAIImages({
-          store_id: storeId, provider: provider.key, model: provider.model,
+          store_id: storeId, provider: provider.key, model: effectiveModel,
           prompt: state.results[index].prompt, size: '1024x1360', count: 1,
           reference_image: references[0], reference_images: references,
         });
@@ -4133,12 +4211,13 @@ async function retrySkuReferenceSuiteImage(index) {
   const item = state?.results[index];
   if (!state || state.running || !item?.error || !state.referenceData?.length) return;
   const provider = state.providers.find(p => p.key === state.providerKey);
+  const retryModel = state.modelId || provider?.model;
   state.running = true;
   item.error = '正在重试…';
   renderSkuReferenceSuiteReview(state);
   try {
     const result = await Api.generateAIImages({
-      store_id: state.watermarkStoreId, provider: provider.key, model: provider.model,
+      store_id: state.watermarkStoreId, provider: provider.key, model: retryModel,
       prompt: item.prompt, size: '1024x1360', count: 1,
       reference_image: state.referenceData[0], reference_images: state.referenceData,
     });

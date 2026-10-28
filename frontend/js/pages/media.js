@@ -29,7 +29,7 @@ function renderGalleryPage() {
 }
 
 function renderAIImagePage() {
-  setTimeout(() => { loadAIGenerationHistory(); Api.getAIModelsStatus().then(showImageModelStatus); toggleAIImageProvider(); sdqApplyImageContext(); loadAIPointBalance(); }, 0);
+  setTimeout(() => { loadAIGenerationHistory(); loadAIImageModels(); Api.getAIModelsStatus().then(showImageModelStatus); toggleAIImageProvider(); sdqApplyImageContext(); loadAIPointBalance(); }, 0);
   return `
     <div class="media-page ai-image-page">
       <div class="media-page-head">
@@ -44,8 +44,9 @@ function renderAIImagePage() {
       <div class="ai-image-workspace">
         <aside class="ai-image-controls" id="aiSinglePanel">
           <div class="ai-model-state" id="aiImageModelState"><span class="state-dot"></span><span>正在读取模型配置...</span></div>
-          <label class="media-label">图片提供商</label>
-          <select id="aiImageProvider" class="form-select" disabled title="生图只支持凌科 AI"><option value="lingkeai" selected>凌科 AI · 纳米香蕉 2.1</option></select>
+          <label class="media-label">图片模型</label>
+          <select id="aiImageModel" class="form-select" onchange="updateAIImageModelHint()"><option value="banana-2.1">香蕉 2.1 · 0.37 点/张</option><option value="tt-image-2">TT Image 2 · 0.2 点/张</option></select>
+          <div id="aiImageModelHint" style="font-size:12px;color:var(--text-muted);margin:-2px 0 8px;">香蕉 2.1 · 0.37 点/张（1 点 = 1 元）</div>
           <label class="media-label">参考图片 <span style="font-weight:400;color:var(--text-muted);">（可选）</span></label>
           <input id="aiImageReferenceInput" type="file" accept="image/png,image/jpeg,image/webp" hidden onchange="selectAIImageReference(this.files[0])">
           <div class="ai-reference-box" id="aiImageReferenceBox">
@@ -80,7 +81,7 @@ function renderAIImagePage() {
           <div class="ai-suite-reference-box" id="aiSuiteReferenceBox"><button type="button" class="btn btn-sm btn-ghost" onclick="document.getElementById('aiSuiteReferenceInput').click()"><i data-lucide="upload"></i> 上传参考图</button><span>建议上传正面、侧面和细节图</span></div>
           <div class="suite-step"><span>2</span><div><b>填写商品要求</b><small>只使用真实信息，不自动虚构卖点</small></div></div>
           <textarea id="aiSuitePrompt" class="form-textarea" rows="7" maxlength="3000" placeholder="例如：黑色无线耳机，保留原图外观和俄语文字；突出降噪、续航和通勤使用场景，不添加未提供的参数"></textarea>
-          <div class="media-form-row"><div><label class="media-label">图片比例</label><select id="aiSuiteSize" class="form-select"><option value="1024x1360">3:4 竖图</option><option value="1024x1024">1:1 方图</option><option value="1024x1536">2:3 竖图</option></select></div><div><label class="media-label">图片模型</label><select id="aiSuiteProvider" class="form-select" disabled title="生图只支持凌科 AI"><option value="lingkeai" selected>凌科 AI · 纳米香蕉 2.1</option></select></div></div>
+          <div class="media-form-row"><div><label class="media-label">图片比例</label><select id="aiSuiteSize" class="form-select"><option value="1024x1360">3:4 竖图</option><option value="1024x1024">1:1 方图</option><option value="1024x1536">2:3 竖图</option></select></div><div><label class="media-label">图片模型</label><select id="aiSuiteModel" class="form-select" onchange="updateAIImageModelHint()"><option value="banana-2.1">香蕉 2.1 · 0.37 点/张</option><option value="tt-image-2">TT Image 2 · 0.2 点/张</option></select><small id="aiSuiteModelHint" style="display:block;margin-top:4px;color:var(--text-muted);font-size:12px;">香蕉 2.1 · 0.37 点/张（1 点 = 1 元）</small></div></div>
           <div class="suite-step suite-step-modules"><span>3</span><div><b>选择套图模块</b><small>每个模块生成 1 张图片</small></div></div>
           <div class="ai-suite-modules">${AI_SUITE_MODULES.map(module => `<label class="ai-suite-module is-selected"><input type="checkbox" value="${module.key}" checked onchange="updateAISuiteModuleState(this)"><span><b>${module.name}</b><small>${module.description}</small></span></label>`).join('')}</div>
           <button id="generateSuiteBtn" class="btn btn-primary ai-generate-btn" onclick="generateAISuite()"><i data-lucide="layers"></i> 生成 Ozon 套图</button>
@@ -153,6 +154,46 @@ const AI_SUITE_MODULES = [
 ];
 let aiSuiteReferences = [];
 let aiSuiteResults = [];
+
+const AI_IMAGE_MODEL_FALLBACKS = [
+  {id:'banana-2.1', label:'香蕉 2.1', points:0.37},
+  {id:'tt-image-2', label:'TT Image 2', points:0.2},
+];
+let aiImageModels = AI_IMAGE_MODEL_FALLBACKS.slice();
+function aiModelText(model) { return `${model.label || model.id} · ${Number(model.points || 0)} 点/张`; }
+function aiModelOptionsHtml() {
+  return aiImageModels.map(model => `<option value="${escapeAttr(model.id)}">${escapeHtml(aiModelText(model))}</option>`).join('');
+}
+async function loadAIImageModels() {
+  try {
+    const response = await Api.getAIModels();
+    const list = response?.code === 200 ? (response.data?.providers?.lingkeai?.models || []) : [];
+    const usable = (Array.isArray(list) ? list : [])
+      .filter(model => model && model.id && model.enabled !== false && model.has_key !== false)
+      .map(model => ({id:model.id, label:model.label || model.id, points:Number(model.points || 0)}));
+    if (usable.length) aiImageModels = usable;
+  } catch (_) { /* 保留兜底列表 */ }
+  ['aiImageModel', 'aiSuiteModel'].forEach(id => {
+    const select = document.getElementById(id);
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = aiModelOptionsHtml();
+    select.value = aiImageModels.some(model => model.id === current) ? current : (aiImageModels[0]?.id || 'banana-2.1');
+  });
+  updateAIImageModelHint();
+}
+function selectedAIImageModel(id) {
+  const value = document.getElementById(id)?.value;
+  return aiImageModels.some(model => model.id === value) ? value : (aiImageModels[0]?.id || 'banana-2.1');
+}
+function updateAIImageModelHint() {
+  const single = aiImageModels.find(model => model.id === selectedAIImageModel('aiImageModel'));
+  const suite = aiImageModels.find(model => model.id === selectedAIImageModel('aiSuiteModel'));
+  const singleEl = document.getElementById('aiImageModelHint');
+  if (singleEl) singleEl.textContent = single ? `${aiModelText(single)}（1 点 = 1 元）` : '';
+  const suiteEl = document.getElementById('aiSuiteModelHint');
+  if (suiteEl) suiteEl.textContent = suite ? `${aiModelText(suite)}（1 点 = 1 元）` : '';
+}
 
 async function sdqApplyImageContext() {
   let context;
@@ -254,6 +295,7 @@ async function generateAIImage() {
         imageSize: '2K',
         template_version: 'single-jlc-v1',
         reference_image: aiImageReference?.dataUrl || undefined,
+        model: selectedAIImageModel('aiImageModel'),
       }),
     });
     if (response?.code !== 200) return Toast.show(response?.msg || '生成失败', 'error');
@@ -299,6 +341,7 @@ async function generateAISuite() {
             imageSize: document.getElementById('aiSuiteImageSize')?.value || '2K',
             moduleKey: item.module.key,
             images: aiSuiteReferences.map(ref => ref.url || ref.dataUrl).filter(Boolean),
+            model: selectedAIImageModel('aiSuiteModel'),
           }),
         });
     if (response?.code === 200 && response.data?.assets?.[0]) {
@@ -329,6 +372,7 @@ async function retryAISuiteItem(index) {
           imageSize: document.getElementById('aiSuiteImageSize')?.value || '2K',
           moduleKey: item.module.key,
           images: aiSuiteReferences.map(ref => ref.url || ref.dataUrl).filter(Boolean),
+          model: selectedAIImageModel('aiSuiteModel'),
         }),
       });
   if (response?.code === 200 && response.data?.assets?.[0]) {
