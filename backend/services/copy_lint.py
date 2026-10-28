@@ -365,4 +365,6 @@ def lint_target(target, payload=None):
                                     result.get('tags') or [], product=product)
     result['sanitized'] = sanitized
     result['source'] = source
+    # R9：审计要能按 product_id 归因，lint 结果里带上被检查的商品
+    result['product_id'] = (product or {}).get('id') or ''
     return result

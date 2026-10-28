@@ -132,6 +132,7 @@ def agent_card_lint(card_id):
         set_agent_audit(status='invalid', error=str(exc))
         return error_response(str(exc), 404)
     set_agent_audit(status='ok' if result.get('ok') else 'warning',
+                    product_id=str(result.get('product_id') or ''),
                     error='' if result.get('ok') else '%d 条文案风险' % len(result.get('violations') or []))
     return success_response(data=result,
                             msg='文案检查通过' if result.get('ok')

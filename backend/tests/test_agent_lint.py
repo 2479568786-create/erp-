@@ -203,6 +203,17 @@ class LintRouteTests(LintTestBase):
         resp = self.client.post('/api/agent/cards/id_missing/lint', headers={'X-Agent-Key': token}, json={})
         self.assertEqual(resp.get_json()['code'], 404)
 
+    def test_lint_audit_has_product_id(self):
+        """R9：lint 调用的审计行要带 product_id，才能按商品归因。"""
+        product = self.make_product(title='Скидка на товар')
+        token = self._token()
+        self.client.post(f'/api/agent/cards/{product["id"]}/lint',
+                         headers={'X-Agent-Key': token}, json={})
+        rows = db.query("SELECT * FROM agent_ops ORDER BY id DESC")
+        self.assertEqual(len(rows), 1, '每次调用只应写一条审计')
+        self.assertEqual(rows[0]['product_id'], product['id'])
+        self.assertEqual(rows[0]['status'], 'warning')
+
 
 class CardLintIntegrationTests(LintTestBase):
     """R2 生成卡后自动 lint，把风险放进 warnings。"""

@@ -250,17 +250,6 @@ def _apply_card_to_product(product, card):
     return saved or product, applied, fallback
 
 
-def _rollback_created_product(product_id):
-    """建卡链路失败时删掉本次创建的商品，避免留下孤儿商品（采集箱里看见、卡却没有）。"""
-    try:
-        from models.product import Product
-
-        Product.delete(product_id)
-        return True
-    except Exception:
-        return False
-
-
 def build_card(payload, token_row=None):
     """R2 主流程。返回 dict（路由层直接塞进 data）。"""
     if not isinstance(payload, dict):
@@ -308,13 +297,23 @@ def build_card(payload, token_row=None):
                 _as_text(payload.get('category_name')),
             ])) or title
             warnings.append('selling_points_zh 为空，已用标题/描述兜底')
+        fallback = []
         try:
             card_row = card_service.generate_card(product_id, selling_points)
+            product, applied, fallback = _apply_card_to_product(product, card_row)
         except Exception as exc:
-            # 建卡失败回滚：商品已落库但卡片没生成，不能留下孤儿商品（R2 修复）
-            _rollback_created_product(product_id)
-            raise AgentValidationError(f'商品卡生成失败：{exc}')
-        product, applied, fallback = _apply_card_to_product(product, card_row)
+            # 补偿回滚：建卡/采纳失败时，本次新建的商品不能留成孤儿
+            # （2026-10-29 R7 线上冒烟暴露：文案质量门槛 422 后商品残留）
+            rolled_back = False
+            try:
+                Product.delete(product_id)
+                rolled_back = True
+            except Exception:
+                pass
+            if rolled_back:
+                raise AgentValidationError(f'商品卡生成失败：{exc}（已回滚本次新建商品 {product_id}）')
+            raise AgentValidationError(
+                f'商品卡生成失败：{exc}（商品已创建但回滚失败，需按 id 清理：{product_id}）')
         if fallback:
             warnings.append('部分卡片字段未找到对应属性，已写入 pendingCardDescription/pendingCardTags 兜底')
         card_row = card_service.get_card(card_row['id']) or card_row

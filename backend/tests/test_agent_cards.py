@@ -203,18 +203,19 @@ class BuildCardTests(CardTestBase):
         self.assertTrue(any('selling_points_zh' in w for w in result['warnings']))
         self.assertEqual(len(self.calls['generate']), 1)
 
-    def test_card_failure_rolls_back_product(self):
-        """建卡失败（如文案质量门槛）时不能把已创建的商品留成孤儿。"""
-        def boom(product_id, raw_selling_points=None, base_card_id=None):
-            raise ValueError('俄文描述仅 134 词，未达 150 词')
-
+    def test_card_generation_failure_rolls_back_product(self):
+        """建卡失败要回滚本次新建的商品，不留孤儿（2026-10-29 线上冒烟暴露）。"""
+        def boom(*args, **kwargs):
+            raise RuntimeError('俄文描述仅 134 词，未达 150 词')
         with patch.object(agent_card_service.card_service, 'generate_card', boom):
-            with self.assertRaises(agent_card_service.AgentValidationError):
+            with self.assertRaises(agent_card_service.AgentValidationError) as ctx:
                 agent_card_service.build_card(self.payload())
-        self.assertEqual(Product.find_all(), [])
-        # 回滚干净后，同一 external_id 还能正常重建
+        self.assertIn('已回滚', str(ctx.exception))
+        self.assertEqual(Product.find_all(), [], '建卡失败后不应残留商品')
+        # 回滚后同 external_id 可重试（不命中幂等分支）
         result = agent_card_service.build_card(self.payload())
         self.assertTrue(result['created'])
+        self.assertEqual(len(Product.find_all()), 1)
 
 
 class RouteContractTests(CardTestBase):
@@ -267,6 +268,21 @@ class RouteContractTests(CardTestBase):
         self.assertEqual(rows[0]['status'], 'ok')
         self.assertTrue(rows[0]['product_id'])
         self.assertEqual(rows[0]['request_id'], 'excel-row-0001')
+
+    def test_generate_failure_422_and_no_orphan_product(self):
+        token = self._token()
+
+        def boom(*args, **kwargs):
+            raise RuntimeError('文案质量门槛未通过')
+
+        with patch.object(agent_card_service.card_service, 'generate_card', boom):
+            resp = self.client.post('/api/agent/cards/build',
+                                    headers={'X-Agent-Key': token}, json=self.payload())
+        self.assertEqual(resp.get_json()['code'], 422)
+        self.assertEqual(Product.find_all(), [], '422 后不应残留孤儿商品')
+        row = db.query("SELECT * FROM agent_ops ORDER BY id DESC")[0]
+        self.assertEqual(row['status'], 'invalid')
+        self.assertEqual(row['request_id'], 'excel-row-0001')
 
 
 if __name__ == '__main__':
