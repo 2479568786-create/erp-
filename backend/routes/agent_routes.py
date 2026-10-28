@@ -8,7 +8,7 @@
 from flask import Blueprint, request
 
 from services import (agent_attributes_service, agent_card_service,
-                      agent_images_service, suite_service)
+                      agent_images_service, agent_validate_service, suite_service)
 from services.agent_card_service import AgentValidationError
 from utils.agent_auth import current_agent, require_agent_scope, set_agent_audit
 from utils.response import error_response, success_response
@@ -96,3 +96,23 @@ def agent_product_attributes(product_id):
         set_agent_audit(status='invalid', error=str(exc))
         return error_response(str(exc), 422)
     return success_response(data=result, msg='已写入 %d 条属性' % len(result['applied']))
+
+
+@agent_bp.route('/products/<product_id>/validate', methods=['POST'])
+@require_agent_scope('products:read')
+def agent_validate_product(product_id):
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return error_response('请求体必须是 JSON 对象', 400)
+    set_agent_audit(product_id=str(product_id))
+    try:
+        result = agent_validate_service.validate_product(
+            product_id,
+            store_id=payload.get('store_id'),
+            dry_run=payload.get('dry_run', True),
+        )
+    except agent_validate_service.AgentValidateError as exc:
+        set_agent_audit(status='invalid', error=str(exc))
+        return error_response(str(exc), 404)
+    return success_response(data=result,
+                            msg='校验通过' if result['ok'] else '发现 %d 个阻断项' % len(result['blocking']))
