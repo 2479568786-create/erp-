@@ -298,8 +298,16 @@ def build_card(payload, token_row=None):
             ])) or title
             warnings.append('selling_points_zh 为空，已用标题/描述兜底')
         fallback = []
+        min_desc_words = payload.get('min_desc_words')
+        allow_short = bool(payload.get('allow_short_description'))
         try:
-            card_row = card_service.generate_card(product_id, selling_points)
+            card_row = card_service.generate_card(
+                product_id, selling_points,
+                min_desc_words=min_desc_words,
+                allow_short_description=allow_short,
+            )
+            # R2-Fix1：词数不足但降级放行时，把卡片侧的警告透传给调用方
+            warnings.extend(card_row.pop('warnings', []) or [])
             product, applied, fallback = _apply_card_to_product(product, card_row)
         except Exception as exc:
             # 补偿回滚：建卡/采纳失败时，本次新建的商品不能留成孤儿

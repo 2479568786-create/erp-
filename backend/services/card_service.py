@@ -324,6 +324,23 @@ def _word_count(text: str) -> int:
     return len(re.findall(r'[A-Za-zА-Яа-яЁё0-9]+', text or ''))
 
 
+def _resolve_min_desc_words(value=None) -> int:
+    """商品卡俄文描述最低词数（R2-Fix1）。
+
+    调用方（如 Agent 建卡）可用 min_desc_words 单次覆盖；否则取
+    Config.CARD_MIN_DESC_WORDS（默认 150，可用环境变量配置）。
+    """
+    raw = value
+    if raw in (None, ''):
+        from config import Config
+
+        raw = getattr(Config, 'CARD_MIN_DESC_WORDS', 150)
+    words = int(raw)
+    if words <= 0:
+        raise ValueError('min_desc_words 必须为正整数')
+    return min(words, 6000)
+
+
 def _normalize_card_lists(result: dict) -> None:
     """后处理：把模型可能输出的分号连接长字符串，拆分成独立数组元素（去重保序）。"""
     for field in ('keywords_ru', 'keywords_zh', 'main_tags_ru', 'main_tags_zh',
@@ -367,10 +384,12 @@ def _remove_detected_brands(result: dict, brands: list[str]) -> None:
             ]
 
 
-def generate_product_card(ctx: dict, selling_points_zh: list[str], selling_points_ru: list[str], seo: dict, provider_key=None, source_facts=None) -> dict:
+def generate_product_card(ctx: dict, selling_points_zh: list[str], selling_points_ru: list[str], seo: dict, provider_key=None, source_facts=None, min_desc_words=None, allow_short_description=False) -> dict:
     """第3步：用核心卖点 + SEO 关键词生成商品卡（标题/描述/主题标签）。
 
     上得快商品卡遵循 ERP 内部 title_ru ≤130 字符校验；原 ERP 商品卡分支不变。
+    R2-Fix1：俄文描述词数不足时自动重试（默认最多 3 次尝试）；仍不足时
+    allow_short_description=True 则降级落库并带 warning，否则抛错（人类流程保持 422）。
     """
     zh_block = '；'.join(selling_points_zh) or '（未填写）'
     ru_block = '；'.join(selling_points_ru) or '（未填写）'
@@ -436,22 +455,42 @@ def generate_product_card(ctx: dict, selling_points_zh: list[str], selling_point
         "\"long_tail_tags_ru\": [], \"long_tail_tags_zh\": [], \"auxiliary_tags_ru\": [], "
         "\"auxiliary_tags_zh\": [], \"pending_confirmations_zh\": [], \"blocked_claims_zh\": []}"
         )
+    is_shangdekuai = provider_key == 'shangdekuai_lingke'
     try:
-        result, provider, model = _chat_json(prompt, temperature=0.4, provider_key=provider_key)
-    except CardServiceError as exc:
-        raise CardServiceError(f'商品卡生成失败：{exc}') from exc
+        min_words = _resolve_min_desc_words(min_desc_words)
+    except (TypeError, ValueError):
+        raise CardServiceError('min_desc_words 必须是正整数')
+    from config import Config
+
+    max_attempts = max(1, int(getattr(Config, 'CARD_DESC_MAX_ATTEMPTS', 3) or 3))
+    warnings = []
+    attempt = 0
+    word_count = 0
+    while True:
+        attempt += 1
+        try:
+            result, provider, model = _chat_json(prompt, temperature=0.4, provider_key=provider_key)
+        except CardServiceError as exc:
+            raise CardServiceError(f'商品卡生成失败：{exc}') from exc
+        description_ru = str(result.get('description_ru', '')).strip()
+        if is_shangdekuai and len(description_ru) > 6000:
+            raise CardServiceError('商品卡生成失败：俄语简介超过 Ozon 的 6000 字符上限，请重新生成')
+        word_count = _word_count(description_ru)
+        if word_count >= min_words or attempt >= max_attempts:
+            break
+
+    if word_count < min_words:
+        if not allow_short_description:
+            raise CardServiceError(
+                f'模型返回的俄文描述仅 {word_count} 词，未达到 {min_words} 词质量要求，请重试'
+                f'（已尝试 {attempt} 次）')
+        # 降级放行：落库并带警告，供 Agent 侧决定是否继续（R2-Fix1）
+        warnings.append(f'description_words={word_count}<{min_words}')
 
     def lst(key):
         return [str(item).strip() for item in result.get(key, []) if str(item).strip()]
 
     keywords_ru = lst('keywords_ru') or (seo.get('keywords_ru') or [])
-    description_ru = str(result.get('description_ru', '')).strip()
-    is_shangdekuai = provider_key == 'shangdekuai_lingke'
-    if is_shangdekuai and len(description_ru) > 6000:
-        raise CardServiceError('商品卡生成失败：俄语简介超过 Ozon 的 6000 字符上限，请重新生成')
-    word_count = _word_count(description_ru)
-    if word_count < 150:
-        raise CardServiceError(f'模型返回的俄文描述仅 {word_count} 词，未达到 150 词质量要求，请重试')
 
     card = {
         'title_ru': str(result.get('title_ru', ''))[:MAX_TITLE_RU_LEN],
@@ -474,6 +513,7 @@ def generate_product_card(ctx: dict, selling_points_zh: list[str], selling_point
         # 内部透传字段：落库前由 caller 读出并移除
         '_provider': provider,
         '_model': model,
+        '_warnings': list(warnings),
     }
     _normalize_card_lists(card)
     _remove_detected_brands(card, _DETECTED_BRAND_PLACEHOLDER)
@@ -701,13 +741,16 @@ def list_versions(product_id: str, page: int = 1, page_size: int = 20) -> dict:
 # 主流程：一键生成/重新生成
 # ============================================================
 
-def generate_card(product_id: str, raw_selling_points=None, base_card_id: int | None = None) -> dict:
+def generate_card(product_id: str, raw_selling_points=None, base_card_id: int | None = None,
+                  min_desc_words=None, allow_short_description=False) -> dict:
     """完整三步生成并落库。
 
     Args:
         product_id: 商品 ID（Product JSON id）
         raw_selling_points: 业务员填写的中文卖点（list 或换行文本）。不传则从 base_card_id 复用。
         base_card_id: 基于某版本再生成（复用其卖点跑全流程）
+        min_desc_words: 俄文描述最低词数（None 走 Config.CARD_MIN_DESC_WORDS，默认 150）
+        allow_short_description: 词数不足时是否降级放行（落库并带 warnings）
     """
     from models.product import Product  # 延迟导入避免循环依赖
 
@@ -749,7 +792,10 @@ def generate_card(product_id: str, raw_selling_points=None, base_card_id: int | 
     validate_russian_card_fields({'selling_points_ru': step1.get('selling_points_ru') or []})
 
     step2 = generate_seo_keywords(ctx, step1['selling_points_zh'], step1.get('selling_points_ru') or [])
-    step3 = generate_product_card(ctx, step1['selling_points_zh'], step1.get('selling_points_ru') or [], step2)
+    step3 = generate_product_card(
+        ctx, step1['selling_points_zh'], step1.get('selling_points_ru') or [], step2,
+        min_desc_words=min_desc_words, allow_short_description=allow_short_description,
+    )
 
     data = {
         'selling_points_zh': step1['selling_points_zh'],
@@ -759,9 +805,12 @@ def generate_card(product_id: str, raw_selling_points=None, base_card_id: int | 
     }
     provider = data.pop('_provider', '') or ''
     model = data.pop('_model', '') or ''
+    warnings = data.pop('_warnings', []) or []
     saved = save_generated_card(
         product_id, data, provider=provider, model=model, previous_id=base_card_id
     )
+    saved = dict(saved)
+    saved['warnings'] = list(warnings)
     return saved
 
 

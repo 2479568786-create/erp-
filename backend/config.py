@@ -127,6 +127,12 @@ class Config:
     # 套图批量默认并发（R3）
     SUITE_CONCURRENCY = int(os.environ.get('SUITE_CONCURRENCY', '2') or '2')
 
+    # ===== 商品卡文案质量门槛（R2-Fix1）=====
+    # 俄文描述最低词数；模型输出会波动（实测 104–148 词），Agent 可用 min_desc_words 单次覆盖
+    CARD_MIN_DESC_WORDS = int(os.environ.get('CARD_MIN_DESC_WORDS', '150') or '150')
+    # 词数不足时的尝试次数（首次 + 自动重试），>=1
+    CARD_DESC_MAX_ATTEMPTS = int(os.environ.get('CARD_DESC_MAX_ATTEMPTS', '3') or '3')
+
     # ===== 价格换算配置 =====
     # 采集 1688 商品时，货源价为人民币(CNY)
     # 根据店铺合同币种自动选择汇率：

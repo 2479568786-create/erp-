@@ -77,8 +77,9 @@ class CardTestBase(unittest.TestCase):
         Product._loaded = False
 
     # ---- mocks ----
-    def _fake_generate(self, product_id, raw_selling_points=None, base_card_id=None):
+    def _fake_generate(self, product_id, raw_selling_points=None, base_card_id=None, **kwargs):
         self.calls['generate'].append((product_id, raw_selling_points))
+        self.calls.setdefault('generate_kwargs', []).append(kwargs)
         card = dict(FAKE_CARD)
         card['product_id'] = product_id
         return card
@@ -216,6 +217,30 @@ class BuildCardTests(CardTestBase):
         result = agent_card_service.build_card(self.payload())
         self.assertTrue(result['created'])
         self.assertEqual(len(Product.find_all()), 1)
+
+    def test_min_desc_words_and_short_description_passthrough(self):
+        """R2-Fix1：min_desc_words/allow_short_description 透传给卡片服务，卡片 warning 回流。"""
+        def fake(product_id, raw_selling_points=None, base_card_id=None, **kwargs):
+            self.calls.setdefault('generate_kwargs', []).append(kwargs)
+            card = dict(FAKE_CARD)
+            card['product_id'] = product_id
+            card['warnings'] = ['description_words=118<120']
+            return card
+
+        payload = self.payload(min_desc_words=120, allow_short_description=True)
+        with patch.object(agent_card_service.card_service, 'generate_card', fake):
+            result = agent_card_service.build_card(payload)
+        kwargs = self.calls['generate_kwargs'][-1]
+        self.assertEqual(kwargs.get('min_desc_words'), 120)
+        self.assertTrue(kwargs.get('allow_short_description'))
+        self.assertEqual(result['warnings'].count('description_words=118<120'), 1)
+
+    def test_min_desc_words_default_none(self):
+        """未传参数时按 None 交给卡片服务（走 Config 默认 150）。"""
+        agent_card_service.build_card(self.payload())
+        kwargs = self.calls['generate_kwargs'][-1]
+        self.assertIsNone(kwargs.get('min_desc_words'))
+        self.assertFalse(kwargs.get('allow_short_description'))
 
 
 class RouteContractTests(CardTestBase):

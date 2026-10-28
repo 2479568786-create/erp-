@@ -225,7 +225,7 @@ class CardLintIntegrationTests(LintTestBase):
             'main_tags_ru': ['#акция'], 'long_tail_tags_ru': [], 'auxiliary_tags_ru': [],
         }
         with patch.object(agent_card_service.card_service, 'generate_card',
-                          lambda product_id, points=None: dict(fake_card)), \
+                          lambda product_id, points=None, **kwargs: dict(fake_card)), \
                 patch.object(agent_card_service.card_service, 'activate_card', lambda card_id: dict(fake_card)), \
                 patch.object(agent_card_service.card_service, 'get_card', lambda card_id: dict(fake_card)), \
                 patch.object(agent_card_service.card_service, 'get_current_card', lambda pid: dict(fake_card)):
