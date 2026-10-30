@@ -13,8 +13,6 @@ const Sidebar = (() => {
     elements.mobileOverlay = document.getElementById('mobileOverlay');
     elements.mainContent = document.getElementById('mainContent');
     elements.navParents = document.querySelectorAll('.nav-parent[data-expandable]');
-    const jlcWorkspaceLink = document.querySelector('[data-page="jlc-workspace"]');
-    if (jlcWorkspaceLink && Store?.getUser?.()?.role === 'admin') jlcWorkspaceLink.style.display = '';
 
     // 折叠按钮（Header 中）
     if (elements.toggleBtn) {
