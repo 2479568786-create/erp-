@@ -13,6 +13,7 @@ import copy
 import re
 import uuid as _uuid
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from models.product import PublishTask, Product, PublishRecord
 from services.ozon_api import (
     import_products, get_import_info, get_attribute_values_full,
@@ -26,11 +27,75 @@ _executor = ThreadPoolExecutor(
     max_workers=int(os.environ.get('OZON_PUBLISH_WORKERS', '3')),
     thread_name_prefix='publish'
 )
-# 图片下载并发线程池（独立于发布线程池，避免图片下载占用发布通道）
-_image_executor = ThreadPoolExecutor(
-    max_workers=int(os.environ.get('OZON_IMAGE_WORKERS', '5')),
-    thread_name_prefix='img-dl'
-)
+# 图片下载线程池（独立于发布线程池，避免图片下载占用发布通道）
+# 2026-10-30 OSS 卡死事故：卡住的 future 不会释放线程，线程池会被拖死，
+# 因此每张图单独交给它并带 20s 看门狗；连续超时直接重建线程池并整单快速失败。
+IMAGE_WORKERS = int(os.environ.get('OZON_IMAGE_WORKERS', '4'))
+# 12s：OSS 内网上传正常约 0.1s/张，12s 已是 100 倍余量；而一次 OSS 失败
+# （connect_timeout 5s × 3 次重试 + 退避）本身约 22s，看门狗必须明显短于它，
+# 才能在 2 张图内快速中止（<30s），而不是等满 3 次重试。
+IMAGE_PROCESS_TIMEOUT = float(os.environ.get('PUBLISH_IMAGE_TIMEOUT', '12'))
+_image_executor = ThreadPoolExecutor(max_workers=IMAGE_WORKERS, thread_name_prefix='img-dl')
+
+# 发布前大图压缩：>300KB 转 JPEG(q86)，长边超 1600 缩放（体积小、Ozon 拉图更快）
+PUBLISH_IMAGE_COMPRESS_THRESHOLD = int(os.environ.get('PUBLISH_IMAGE_COMPRESS_THRESHOLD',
+                                                      str(300 * 1024)))
+PUBLISH_IMAGE_MAX_SIDE = int(os.environ.get('PUBLISH_IMAGE_MAX_SIDE', '1600'))
+PUBLISH_IMAGE_JPEG_QUALITY = int(os.environ.get('PUBLISH_IMAGE_JPEG_QUALITY', '86'))
+
+
+def _replace_image_executor():
+    """丢弃当前图片线程池并重建（卡死 future 占用的线程不再影响后续任务）。"""
+    global _image_executor
+    old = _image_executor
+    try:
+        old.shutdown(wait=False, cancel_futures=True)
+    except TypeError:  # Python < 3.9
+        old.shutdown(wait=False)
+    _image_executor = ThreadPoolExecutor(max_workers=IMAGE_WORKERS, thread_name_prefix='img-dl')
+    print('[图片预处理] 已重建图片线程池（max_workers=%d）' % IMAGE_WORKERS)
+    return _image_executor
+
+
+def image_executor_stats():
+    """健康检查用：线程池配置与存活线程数。"""
+    try:
+        threads = [t for t in (getattr(_image_executor, '_threads', []) or []) if t.is_alive()]
+    except Exception:
+        threads = []
+    return {
+        'max_workers': getattr(_image_executor, '_max_workers', IMAGE_WORKERS),
+        'threads_alive': len(threads),
+        'timeout_sec': IMAGE_PROCESS_TIMEOUT,
+    }
+
+
+def _maybe_compress_for_publish(image_data, ext):
+    """大图发布前压成 JPEG（>300KB 才压），返回 (data, ext)；失败原样返回。"""
+    if not image_data or len(image_data) <= PUBLISH_IMAGE_COMPRESS_THRESHOLD:
+        return image_data, ext
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        with Image.open(BytesIO(image_data)) as image:
+            image = image.convert('RGB')
+            width, height = image.size
+            longest = max(width, height)
+            if longest > PUBLISH_IMAGE_MAX_SIDE:
+                scale = PUBLISH_IMAGE_MAX_SIDE / float(longest)
+                image = image.resize((max(1, int(width * scale)), max(1, int(height * scale))),
+                                     Image.LANCZOS)
+            out = BytesIO()
+            image.save(out, format='JPEG', quality=PUBLISH_IMAGE_JPEG_QUALITY, optimize=True)
+        compressed = out.getvalue()
+        if compressed and len(compressed) < len(image_data):
+            return compressed, 'jpg'
+        return image_data, ext
+    except Exception as exc:  # noqa: BLE001 - 压缩失败不阻断发布
+        print(f'[图片压缩] 跳过（{exc}）')
+        return image_data, ext
 
 
 class _TokenBucket:
@@ -170,6 +235,8 @@ def _download_and_save_image(img_url):
         elif 'gif' in content_type:
             ext = 'gif'
 
+        # 大图先压缩再上传（2026-10-30：减小上传体积，避免 OSS 写入抖动拖慢发布）
+        image_data, ext = _maybe_compress_for_publish(image_data, ext)
         # 使用 storage_service 保存（本地或对象存储）
         from services.storage_service import save_image
         return save_image(image_data, ext)
@@ -243,6 +310,7 @@ def preprocess_images_for_publish(product):
                 if len(image_data) > Config.MAX_IMAGE_SIZE:
                     return ('__ERROR__', '图片大小超过限制')
 
+                image_data, ext = _maybe_compress_for_publish(image_data, ext)
                 from services.storage_service import save_image
                 return save_image(image_data, ext)
             except Exception as e:
@@ -275,6 +343,7 @@ def preprocess_images_for_publish(product):
                     image_data = image_file.read(Config.MAX_IMAGE_SIZE + 1)
                 if len(image_data) > Config.MAX_IMAGE_SIZE:
                     return ('__ERROR__', '图片大小超过限制')
+                image_data, ext = _maybe_compress_for_publish(image_data, ext)
                 from services.storage_service import save_image
                 return save_image(image_data, ext)
             except OSError as e:
@@ -338,26 +407,37 @@ def preprocess_images_for_publish(product):
         if img:
             all_urls.add(img)
 
-    # === 并发处理所有图片 ===
+    # === 顺序处理所有图片（2026-10-30 修复）===
+    # 不再「8 张图一起排队 + 各自等 60s」：一张卡住会占满线程池、拖死后续所有发布任务。
+    # 现在逐张处理、每张 20s 看门狗；连续 2 次超时立即重建线程池并整单失败。
     url_map = {}  # original_url → new_url
+    consecutive_timeouts = 0
     if all_urls:
-        futures = {
-            _image_executor.submit(_process_single_image, url): url
-            for url in all_urls
-        }
-        for future in futures:
-            original_url = futures[future]
+        for original_url in all_urls:
+            future = _image_executor.submit(_process_single_image, original_url)
             try:
-                result = future.result(timeout=60)
-                if isinstance(result, tuple) and len(result) == 2 and result[0] == '__ERROR__':
-                    errors.append(result[1])
-                    url_map[original_url] = None
-                elif result:
-                    url_map[original_url] = result
-                else:
-                    url_map[original_url] = None
+                result = future.result(timeout=IMAGE_PROCESS_TIMEOUT)
+            except FuturesTimeout:
+                consecutive_timeouts += 1
+                errors.append(f'图片上传超时（>{IMAGE_PROCESS_TIMEOUT:.0f}s）: {original_url[:60]}')
+                url_map[original_url] = None
+                if consecutive_timeouts >= 2:
+                    _replace_image_executor()
+                    errors.append('连续 2 次图片上传超时，已重建图片线程池并中止本单预处理，'
+                                  '避免拖垮后续发布任务')
+                    break
+                continue
             except Exception as e:
                 errors.append(f'图片处理异常: {original_url[:60]} - {e}')
+                url_map[original_url] = None
+                continue
+            consecutive_timeouts = 0
+            if isinstance(result, tuple) and len(result) == 2 and result[0] == '__ERROR__':
+                errors.append(result[1])
+                url_map[original_url] = None
+            elif result:
+                url_map[original_url] = result
+            else:
                 url_map[original_url] = None
 
     # === 将处理结果写回 product 对象 ===

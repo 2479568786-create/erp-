@@ -77,22 +77,48 @@ def _upload_to_qiniu(image_data, filename):
 
 
 def _upload_to_oss(image_data, filename):
-    """上传图片到阿里云 OSS，返回 HTTPS 公网 URL。"""
+    """上传图片到阿里云 OSS，返回 HTTPS 公网 URL。
+
+    2026-10-30 修复「OSS 上传卡死拖垮发布队列」：
+    - 上传走**内网 endpoint**（同区域免公网抖动），返回 URL 用**公网 endpoint**（Ozon 要能访问）；
+    - 显式 connect_timeout/连接池，失败重试 3 次（指数退避），每次重试前丢弃坏 keep-alive 连接；
+    - 全部失败返回 None，由上层降级/整单快速失败，绝不无限挂起。
+    """
     ak = Config.OSS_ACCESS_KEY_ID
     sk = Config.OSS_ACCESS_KEY_SECRET
     bucket = Config.OSS_BUCKET
-    endpoint = Config.OSS_ENDPOINT
-    if not all([ak, sk, bucket, endpoint]):
+    upload_endpoint = (getattr(Config, 'OSS_UPLOAD_ENDPOINT', '') or Config.OSS_ENDPOINT or '').strip()
+    public_endpoint = (getattr(Config, 'OSS_PUBLIC_ENDPOINT', '') or Config.OSS_ENDPOINT or '').strip()
+    if not all([ak, sk, bucket, upload_endpoint]):
         return None
+
     try:
         import oss2
+
+        oss2.defaults.connect_timeout = float(os.environ.get('OSS_CONNECT_TIMEOUT', '5'))
+        oss2.defaults.connection_pool_size = int(os.environ.get('OSS_CONNECTION_POOL_SIZE', '10'))
+
         auth = oss2.Auth(ak, sk)
-        bucket_obj = oss2.Bucket(auth, f'https://{endpoint}', bucket)
-        bucket_obj.put_object(filename, image_data)
-        return f'https://{bucket}.{endpoint}/{filename}'
-    except Exception as e:
-        print(f'[对象存储] OSS 上传异常: {e}')
-        return None
+        last_error = None
+        for attempt in range(3):
+            bucket_obj = oss2.Bucket(
+                auth, f'https://{upload_endpoint}', bucket,
+                connect_timeout=float(os.environ.get('OSS_CONNECT_TIMEOUT', '5')),
+            )
+            try:
+                bucket_obj.put_object(filename, image_data)
+                return f'https://{bucket}.{public_endpoint}/{filename}'
+            except Exception as exc:  # noqa: BLE001 - 单次失败要重试
+                last_error = exc
+                time.sleep(2 ** attempt)
+                try:
+                    bucket_obj.session.session.close()  # 丢弃可能卡死的 keep-alive 连接
+                except Exception:
+                    pass
+        print(f'[对象存储] OSS 上传失败（已重试 3 次）: {last_error}')
+    except Exception as exc:  # noqa: BLE001
+        print(f'[对象存储] OSS 上传异常: {exc}')
+    return None
 
 
 def save_image(image_data, ext='jpg'):

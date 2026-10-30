@@ -118,6 +118,10 @@ class Config:
     OSS_ACCESS_KEY_SECRET = os.environ.get('OSS_ACCESS_KEY_SECRET', '')
     OSS_BUCKET = os.environ.get('OSS_BUCKET', '')
     OSS_ENDPOINT = os.environ.get('OSS_ENDPOINT', '')
+    # 2026-10-30 OSS 上传卡死修复：上传走内网 endpoint（服务器与 bucket 同区域），
+    # 返回给 Ozon 的 URL 必须用公网 endpoint；未配置时回退 OSS_ENDPOINT（兼容旧部署）。
+    OSS_UPLOAD_ENDPOINT = os.environ.get('OSS_UPLOAD_ENDPOINT', '')
+    OSS_PUBLIC_ENDPOINT = os.environ.get('OSS_PUBLIC_ENDPOINT', '')
 
     # ===== Agent 服务令牌（R1）=====
     # pepper：token 哈希加盐，必填（缺失时 Agent 接口 fail-closed，返回 503）

@@ -31,6 +31,7 @@ from routes.auto_save_routes import auto_save_bp
 from routes.ai_results_routes import ai_results_bp
 from routes.product_analysis_routes import product_analysis_bp
 from routes.public_notification_routes import public_notification_bp
+from routes.publish_health_routes import publish_health_bp
 from routes.jlc_workspace_routes import jlc_workspace_bp
 from routes.jlc_bridge_routes import jlc_bridge_bp
 from routes.jlc_pipeline_routes import jlc_pipeline_bp
@@ -101,3 +102,4 @@ def register_blueprints(app):
     app.register_blueprint(ozon_collect_bp)
     app.register_blueprint(image_billing_bp, url_prefix='/api')
     app.register_blueprint(agent_bp, url_prefix='/api')
+    app.register_blueprint(publish_health_bp, url_prefix='/api')
