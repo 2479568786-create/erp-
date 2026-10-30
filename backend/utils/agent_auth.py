@@ -159,15 +159,18 @@ def has_scope(row, scope):
     return scope in scopes or '*' in scopes
 
 
-def log_agent_op(token_row, scope, action, status='ok', product_id='', request_id='', duration_ms=0, error=''):
-    """写 agent_ops 审计（R9 基础）。失败不影响主流程。"""
+def log_agent_op(token_row, scope, action, status='ok', product_id='', request_id='', duration_ms=0,
+                 error='', account_id=None, username=''):
+    """写 agent_ops 审计（R9 基础；R-A5 起记「谁调的」）。失败不影响主流程。"""
     try:
         execute(
             """INSERT INTO agent_ops
-               (token_id, scope, action, product_id, request_id, status, duration_ms, error, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+               (token_id, scope, action, product_id, request_id, status, duration_ms, error,
+                account_id, username, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
             (token_row.get('id') if token_row else None, scope or '', action or '',
-             product_id or '', request_id or '', status or 'ok', int(duration_ms or 0), (error or '')[:1000]),
+             product_id or '', request_id or '', status or 'ok', int(duration_ms or 0),
+             (error or '')[:1000], account_id, (username or '')[:120]),
         )
     except Exception:
         pass
@@ -228,10 +231,11 @@ def set_agent_audit(**fields):
 
 
 def agent_audit_after_request(response):
-    """每个成功的 Agent 调用写且只写一条 agent_ops。"""
+    """每个 Agent 调用写且只写一条 agent_ops（R-A5：JWT 调用记到人）。"""
     token = getattr(g, 'agent_token', None)
     scope = getattr(g, 'agent_scope', None)
-    if not token or not scope:
+    user = getattr(g, 'agent_user', None)
+    if not scope or (not token and not user):
         return response
     try:
         status_code = getattr(response, 'status_code', 200)
@@ -240,6 +244,12 @@ def agent_audit_after_request(response):
         if audit.get('status'):
             status = audit['status']
         started = getattr(g, 'agent_started', None) or time.time()
+        if token:
+            account_id = token.get('account_id')
+            username = 'agent:%s' % (token.get('name') or token.get('id') or '')
+        else:
+            account_id = user.get('id')
+            username = user.get('username') or user.get('nickname') or ''
         log_agent_op(
             token, scope, f'{request.method} {request.path}',
             status=status,
@@ -247,6 +257,8 @@ def agent_audit_after_request(response):
             request_id=str(audit.get('request_id') or ''),
             duration_ms=(time.time() - started) * 1000,
             error=str(audit.get('error') or ''),
+            account_id=account_id,
+            username=username,
         )
     except Exception:
         pass
@@ -259,7 +271,12 @@ def current_agent():
 
 
 def require_agent_scope(scope):
-    """装饰器：要求 Agent 令牌具备 scope；JWT 管理员同样可用（便于页面排障）。
+    """装饰器：要求 Agent 令牌具备 scope；管理员与业务员 JWT 同样可用。
+
+    - Agent 令牌：校验 scope（行为不变）；
+    - admin JWT：放行（行为不变，便于页面排障）；
+    - salesperson / operator JWT（R-A1 新增）：放行，店铺级校验交给服务层/路由层；
+    - 其它角色 JWT：403；未登录：401。
 
     全局 guard 已对白名单路径做过一次校验，这里用于新增的 /api/agent/* 路由自身兜底。
     """
@@ -271,6 +288,7 @@ def require_agent_scope(scope):
                 if not has_scope(agent, scope):
                     return error_response(f'令牌缺少权限：{scope}', 403)
                 return fn(*args, **kwargs)
+            from utils.agent_scope import SCOPED_ROLES
             try:
                 from utils.auth import get_current_user
                 user = get_current_user()
@@ -278,8 +296,20 @@ def require_agent_scope(scope):
                 user = None
             if user and user.get('role') == 'admin':
                 return fn(*args, **kwargs)
+            if user and user.get('role') in SCOPED_ROLES:
+                # R-A1：业务员/操作员用自己的 JWT 直接调 Agent 接口（店铺范围在服务层校验）
+                g.agent_user = user
+                g.agent_scope = 'jwt'
+                g.agent_started = time.time()
+                g.agent_audit = {}
+                return fn(*args, **kwargs)
             if user:
                 return error_response('需要 Agent 令牌或管理员登录', 403)
             return error_response('需要 Agent 令牌', 401)
         return wrapper
     return decorator
+
+
+def current_agent_user():
+    """当前请求的业务员/操作员 JWT 用户（R-A1）；非该场景返回 None。"""
+    return getattr(g, 'agent_user', None)

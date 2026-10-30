@@ -12,6 +12,9 @@ from services import (agent_attributes_service, agent_card_service,
                       suite_service)
 from services.agent_card_service import AgentValidationError
 from utils.agent_auth import current_agent, require_agent_scope, set_agent_audit
+from utils.agent_scope import (AgentNotFoundError, AgentPermissionError,
+                               assert_product_owned, current_user,
+                               forced_billing_account, requires_store_scope)
 from utils.response import error_response, success_response
 
 agent_bp = Blueprint('agent', __name__)
@@ -50,14 +53,73 @@ def _upstream_error_response(exc, scope_label='请求'):
     }), 500
 
 
+# ---------------------------------------------------------------------------
+# 店铺级权限（R-A3）：业务员 JWT 只能操作自己店铺的商品。
+# 未登录（Agent 令牌）与管理员不受限；对象不存在 404、越权 403。
+# ---------------------------------------------------------------------------
+
+def _owned_product(product_id):
+    """返回 (product, None) 或 (None, error_response)。"""
+    try:
+        product, _store = assert_product_owned(product_id, current_user())
+        return product, None
+    except AgentNotFoundError as exc:
+        return None, error_response(str(exc), 404)
+    except AgentPermissionError as exc:
+        return None, error_response(str(exc), 403)
+
+
+def _deny(product_id, resp):
+    """越权/不存在时补审计字段并返回响应。"""
+    try:
+        body = resp.get_json() or {}
+        msg = body.get('msg') or ''
+        code = int(body.get('code') or 0)
+    except Exception:
+        msg, code = '', 0
+    set_agent_audit(product_id=str(product_id),
+                    status='forbidden' if code == 403 else 'invalid',
+                    error=msg)
+    return resp
+
+
+_LINT_TEXT_KEYS = ('title_ru', 'description_ru', 'tags')
+
+
+def _lint_target_product_id(card_id, payload):
+    """lint 的 target 解析成商品 id（用于归属校验）；直接传文案时返回 ''。"""
+    payload = payload if isinstance(payload, dict) else {}
+    if any(payload.get(key) for key in _LINT_TEXT_KEYS):
+        return ''
+    text = str(card_id or '').strip()
+    if not text:
+        return ''
+    if text.isdigit():
+        try:
+            from services import card_service
+
+            card = card_service.get_card(int(text))
+        except Exception:
+            card = None
+        return str((card or {}).get('product_id') or '')
+    if text.startswith('id_'):
+        return text
+    return ''
+
+
 @agent_bp.route('/agent/cards/build', methods=['POST'])
 @require_agent_scope('cards:write')
 def agent_build_card():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return error_response('请求体必须是 JSON 对象', 400)
+    user = current_user()
     try:
-        result = agent_card_service.build_card(payload)
+        result = agent_card_service.build_card(payload, user=user)
+    except AgentPermissionError as exc:  # R-A2：跨店 / 未指定店铺
+        set_agent_audit(status='forbidden', error=str(exc),
+                        request_id=str(payload.get('external_id') or ''))
+        return error_response(str(exc), 403)
     except AgentValidationError as exc:
         set_agent_audit(status='invalid', error=str(exc),
                         request_id=str(payload.get('external_id') or ''))
@@ -78,6 +140,9 @@ def agent_attach_images(product_id):
     if not isinstance(payload, dict):
         return error_response('请求体必须是 JSON 对象', 400)
     set_agent_audit(product_id=str(product_id))
+    _product, deny = _owned_product(product_id)  # R-A3
+    if deny is not None:
+        return _deny(product_id, deny)
     try:
         from utils.auth import get_current_user
         result = agent_images_service.attach_images(
@@ -103,10 +168,38 @@ def agent_images_suite():
     if not isinstance(payload, dict):
         return error_response('请求体必须是 JSON 对象', 400)
     agent = current_agent() or {}
+    user = current_user()
     set_agent_audit(product_id=str(payload.get('product_id') or ''),
                     request_id=str(payload.get('request_id') or ''))
+    token_account_id = agent.get('account_id')
+    if requires_store_scope(user):
+        # R-A4：业务员套图只能记在「商品所属店铺」的账号上，禁止显式覆盖
+        product_id = str(payload.get('product_id') or '').strip()
+        if not product_id:
+            set_agent_audit(status='forbidden', error='业务员套图必须指定 product_id')
+            return error_response('业务员套图必须指定 product_id（按商品所属店铺计费）', 403)
+        _product, deny = _owned_product(product_id)
+        if deny is not None:
+            return _deny(product_id, deny)
+        forced = forced_billing_account(_product)
+        if not forced:
+            set_agent_audit(status='forbidden', error='商品未绑定店铺，无法确定计费账号')
+            return error_response('商品未绑定店铺，无法确定计费账号', 403)
+        explicit = payload.get('billing_account_id')
+        if explicit not in (None, ''):
+            try:
+                explicit_id = int(explicit)
+            except (TypeError, ValueError):
+                set_agent_audit(status='invalid', error='billing_account_id 必须是整数')
+                return error_response('billing_account_id 必须是整数', 422)
+            if explicit_id != forced:
+                set_agent_audit(status='forbidden', error='禁止指定其它账号计费')
+                return error_response('禁止指定计费账号：业务员套图只能记在商品所属店铺账号', 403)
+        payload = dict(payload)
+        payload['billing_account_id'] = forced
+        token_account_id = forced
     try:
-        result = suite_service.generate_suite(payload, agent.get('account_id'))
+        result = suite_service.generate_suite(payload, token_account_id)
     except suite_service.AgentSuiteBillingError as exc:
         set_agent_audit(status='forbidden', error=str(exc))
         return error_response(str(exc), 403)
@@ -131,6 +224,9 @@ def agent_product_attributes(product_id):
     if not isinstance(payload, dict):
         return error_response('请求体必须是 JSON 对象', 400)
     set_agent_audit(product_id=str(product_id))
+    _product, deny = _owned_product(product_id)  # R-A3
+    if deny is not None:
+        return _deny(product_id, deny)
     try:
         result = agent_attributes_service.apply_attributes(product_id, payload)
     except agent_attributes_service.AgentAttributeError as exc:
@@ -146,6 +242,9 @@ def agent_validate_product(product_id):
     if not isinstance(payload, dict):
         return error_response('请求体必须是 JSON 对象', 400)
     set_agent_audit(product_id=str(product_id))
+    _product, deny = _owned_product(product_id)  # R-A3
+    if deny is not None:
+        return _deny(product_id, deny)
     try:
         result = agent_validate_service.validate_product(
             product_id,
@@ -166,6 +265,11 @@ def agent_card_lint(card_id):
     if not isinstance(payload, dict):
         return error_response('请求体必须是 JSON 对象', 400)
     set_agent_audit()
+    target_product_id = _lint_target_product_id(card_id, payload)  # R-A3
+    if target_product_id:
+        _product, deny = _owned_product(target_product_id)
+        if deny is not None:
+            return _deny(target_product_id, deny)
     try:
         result = copy_lint.lint_target(card_id, payload)
     except ValueError as exc:
@@ -216,9 +320,15 @@ def agent_ops_list():
     if since:
         conditions.append('created_at >= ?')
         params.append(since)
+    # R-A5：业务员/操作员只看自己账号的审计记录
+    scoped_user = current_user()
+    if requires_store_scope(scoped_user):
+        conditions.append('account_id = ?')
+        params.append(int(scoped_user.get('id') or 0))
     where = (' WHERE ' + ' AND '.join(conditions)) if conditions else ''
     rows = _query(
-        'SELECT id, token_id, scope, action, product_id, request_id, status, duration_ms, error, created_at'
+        'SELECT id, token_id, account_id, username, scope, action, product_id, request_id,'
+        ' status, duration_ms, error, created_at'
         ' FROM agent_ops' + where + ' ORDER BY id DESC LIMIT ?',
         tuple(params + [limit]),
     )

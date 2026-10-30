@@ -30,6 +30,9 @@ class AgentValidationError(ValueError):
     """入参不合法（路由层转 422）。"""
 
 
+from utils.agent_scope import AgentPermissionError  # noqa: E402  (R-A2 店铺越权，路由层转 403)
+
+
 def _as_text(value):
     if value is None:
         return ''
@@ -386,8 +389,12 @@ def _apply_card_to_product(product, card):
     return saved or product, applied, fallback
 
 
-def build_card(payload, token_row=None):
-    """R2 主流程。返回 dict（路由层直接塞进 data）。"""
+def build_card(payload, token_row=None, user=None):
+    """R2 主流程。返回 dict（路由层直接塞进 data）。
+
+    user：当前 JWT 用户（R-A1 业务员放行后传入）。业务员只能在自己的店铺建卡：
+    store_id 必填且必须属于自己，校验在落库之前完成（不通过抛 AgentPermissionError）。
+    """
     if not isinstance(payload, dict):
         raise AgentValidationError('请求体必须是 JSON 对象')
     external_id = _as_text(payload.get('external_id'))
@@ -397,8 +404,17 @@ def build_card(payload, token_row=None):
     if not title:
         raise AgentValidationError('title 必填')
 
+    from utils.agent_scope import assert_store_for_user, product_store, store_account_id
+
+    assert_store_for_user(user, payload.get('store_id'))  # R-A2
+
     existing = _find_by_external_id(external_id)
     if existing:
+        # R-A2：幂等命中也要管住店铺边界，避免拿别人的 external_id 探到商品
+        if user and user.get('role') != 'admin':
+            store = product_store(existing)
+            if not store or store_account_id(store) != int(user.get('id') or 0):
+                raise AgentPermissionError('无权访问该商品：external_id 已被其它店铺占用')
         card = None
         try:
             card = card_service.get_current_card(existing['id'])

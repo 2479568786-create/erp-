@@ -241,6 +241,24 @@ def _migrate_agent_tokens(conn):
     conn.commit()
 
 
+def _migrate_agent_ops_actor(conn):
+    """迁移 0.11：agent_ops 记「谁调的」（R-A5 业务员 JWT 放行后审计到人）。
+
+    - account_id：JWT 调用者账号；Agent 令牌调用记令牌绑定账号（可能为空）
+    - username：JWT 用户名 / `agent:<令牌名>`
+    幂等：列已存在跳过；历史行为 NULL / ''。
+    """
+    existing = {row['name'] for row in conn.execute("PRAGMA table_info(agent_ops)")}
+    for name, ddl in (
+        ('account_id', "ALTER TABLE agent_ops ADD COLUMN account_id INTEGER"),
+        ('username', "ALTER TABLE agent_ops ADD COLUMN username TEXT NOT NULL DEFAULT ''"),
+    ):
+        if name not in existing:
+            conn.execute(ddl)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_agent_ops_account ON agent_ops(account_id, created_at)")
+    conn.commit()
+
+
 def _migrate_gallery_agent_columns(conn):
     """图库标注列（R3）：套图产物可按产品/模块/请求号精确查询。"""
     existing = {row['name'] for row in conn.execute("PRAGMA table_info(gallery_assets)")}
@@ -281,6 +299,9 @@ def _run_migrations(conn):
 
     # 迁移0.10：图库标注列（product_id/module_key/request_id/agent_source）
     _migrate_gallery_agent_columns(conn)
+
+    # 迁移0.11：agent_ops 记调用者（account_id/username），业务员 JWT 放行后审计到人
+    _migrate_agent_ops_actor(conn)
 
     # 迁移1：ozon_attribute_dictionary_values 添加 description_category_id 和 type_id 列
     # 原因：dictionary_id 在 Ozon 中可能被多个类目共享（如"类型"属性），
