@@ -343,7 +343,6 @@ function renderTable() {
           <button class="action-link" onclick="aiOptimize('${p.id}')" title="AI优化">AI优化</button>
           <button class="action-link" onclick="editProduct('${p.id}')" title="编辑">编辑</button>
           <button class="action-link" onclick="publishProduct('${p.id}')" title="发布">发布</button>
-          <button class="action-link jlc" onclick="sendToJlc('${p.id}')" title="送 JLC 工作区跑 15 步流水线上架">送JLC生产</button>
           <button class="action-link" onclick="multiStorePublish('${p.id}')" title="多店铺同时上架">多店上架</button>
           <button class="action-link danger" onclick="deleteProduct('${p.id}')" title="删除">删除</button>
           <button class="action-link note-action" onclick="addNote('${p.id}')" title="备注">备注</button>
@@ -6637,26 +6636,6 @@ async function pollPublishStatus(productId, taskId, maxRetries = 30, interval = 
 }
 
 /** 删除商品 */
-/** 送 JLC 工作区生产：把 ERP 采集箱商品桥接到 JLC（生成 P 号商品跑 15 步流水线）。 */
-async function sendToJlc(id) {
-  try {
-    const res = await Api.request('/api/ext/product/export-to-jlc', {
-      method: 'POST',
-      body: JSON.stringify({ productId: id }),
-    });
-    if (res.code === 200 && res.data && res.data.jlcProductId) {
-      Toast.show('已送进 JLC 工作区：' + res.data.jlcProductId + '，可运行流水线上架', 'success', 6000);
-      const p = allProducts.find(x => x.id === id);
-      if (p) p.jlcProductId = res.data.jlcProductId;
-      renderTable();
-    } else {
-      Toast.show(res.msg || '送 JLC 失败', 'error', 8000);
-    }
-  } catch (e) {
-    Toast.show('送 JLC 异常：' + (e && e.message ? e.message : e), 'error', 8000);
-  }
-}
-
 async function deleteProduct(id) {
   const confirmed = await Modal.confirm('确定要删除该商品吗？');
   if (!confirmed) return;
