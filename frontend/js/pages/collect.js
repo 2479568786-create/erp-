@@ -4431,54 +4431,348 @@ function uploadLocalFile(skuIndex) {
   input.click();
 }
 
-/** 从 ERP 图库多选图片并加入当前 SKU。 */
+/** 图库选图器（E1 有序选区 / E2 分页懒加载）。
+ *  E1：点选即进入“已选区”，按点击顺序编号 ①②③；可拖拽调序、单张删除、设为主图；
+ *      Shift 连选、Ctrl 追加、全选本页按当前顺序追加；提交前弹顺序确认（可再调、可撤销）；
+ *      最终严格按已选区数组顺序写入 SKU 图片（不再按 DOM/图库顺序）。
+ *  E2：列表走 /api/gallery 的 page/pageSize=24 分页，缩略图（D1）未上线前用原图 + lazy 加载，
+ *      thumb_url 若 404 自动回退原图；默认只看最近 7 天（本页内过滤，不足时自动往后翻页补齐）。
+ */
+const GALLERY_PICKER_PAGE_SIZE = 24;
+let _galleryPicker = null;
+let _galleryPickerSearchTimer = null;
+
+function _galleryPickerAssetRecent(asset) {
+  const text = String(asset?.created_at || '').replace(' ', 'T');
+  if (!text) return true;
+  const time = Date.parse(text);
+  if (Number.isNaN(time)) return true;
+  return (Date.now() - time) <= 7 * 24 * 3600 * 1000;
+}
+
+function _galleryPickerAssetUrl(asset) {
+  return asset.thumb_url || asset.url || '';
+}
+
+function _galleryPickerRenderThumb(asset, checked) {
+  const thumb = escapeAttr(_galleryPickerAssetUrl(asset));
+  const origin = escapeAttr(asset.url || '');
+  const title = escapeAttr(asset.title || asset.original_name || '图库图片');
+  const order = checked ? _galleryPicker.selected.findIndex(item => String(item.id) === String(asset.id)) + 1 : 0;
+  const badge = order ? `<span class="gallery-picker-order">${order}</span>` : '';
+  return `<button type="button" class="picker-thumb ${checked ? 'is-selected' : ''}" data-asset-id="${escapeAttr(asset.id)}" title="${title}">
+      <img src="${thumb}" alt="${title}" loading="lazy" onerror="this.onerror=null;this.src='${origin}';">
+      ${badge}
+    </button>`;
+}
+
+function _galleryPickerRenderSelected() {
+  const box = document.getElementById('erpGallerySelected');
+  if (!box) return;
+  const count = document.getElementById('galleryPickerSelectedCount');
+  if (count) count.textContent = `${_galleryPicker.selected.length} 张`;
+  if (!_galleryPicker.selected.length) {
+    box.innerHTML = '<div style="color:var(--text-tertiary);font-size:12px;padding:20px 8px;">点击上方图片加入已选区；顺序即最终写入 SKU 的顺序</div>';
+    return;
+  }
+  box.innerHTML = _galleryPicker.selected.map((item, index) => `
+    <div class="picker-selected-item" draggable="true" data-selected-index="${index}" style="position:relative;flex:0 0 auto;width:86px;text-align:center;">
+      <div style="position:absolute;left:2px;top:2px;background:#1f2937;color:#fff;border-radius:10px;min-width:18px;height:18px;line-height:18px;font-size:11px;z-index:2;">${index + 1}</div>
+      <img src="${escapeAttr(item.url)}" alt="" loading="lazy" style="width:86px;height:86px;object-fit:cover;border-radius:6px;border:1px solid var(--border-color,#e4e7ec);cursor:grab;">
+      <div style="display:flex;gap:2px;justify-content:center;margin-top:2px;">
+        <button type="button" class="btn btn-xs btn-ghost" title="设为第 1 张（主图）" onclick="galleryPickerSetMain(${index})" style="padding:0 4px;">①</button>
+        <button type="button" class="btn btn-xs btn-ghost" title="前移" onclick="galleryPickerMove(${index}, -1)" style="padding:0 4px;">←</button>
+        <button type="button" class="btn btn-xs btn-ghost" title="后移" onclick="galleryPickerMove(${index}, 1)" style="padding:0 4px;">→</button>
+        <button type="button" class="btn btn-xs btn-ghost" title="移除" onclick="galleryPickerRemove(${index})" style="padding:0 4px;">×</button>
+      </div>
+    </div>`).join('');
+  box.querySelectorAll('.picker-selected-item').forEach(node => {
+    node.addEventListener('dragstart', event => {
+      _galleryPicker.dragFrom = Number(node.dataset.selectedIndex);
+      try { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', String(_galleryPicker.dragFrom)); } catch (_) {}
+    });
+    node.addEventListener('dragover', event => { event.preventDefault(); });
+    node.addEventListener('drop', event => {
+      event.preventDefault();
+      const from = _galleryPicker.dragFrom ?? Number(event.dataTransfer?.getData('text/plain'));
+      const to = Number(node.dataset.selectedIndex);
+      galleryPickerReorder(from, to);
+    });
+  });
+}
+
+function _galleryPickerRender() {
+  const grid = document.getElementById('erpGalleryPicker');
+  if (!grid) return;
+  if (!_galleryPicker.assets.length) {
+    grid.innerHTML = `<div style="color:var(--text-tertiary);font-size:13px;padding:12px 0;">${_galleryPicker.recentOnly ? '本页暂无最近 7 天的图片，可取消“仅看最近 7 天”或翻页。' : '图库暂无图片，请先在“我的图库”上传或使用 AI 图片生成。'}</div>`;
+  } else {
+    grid.innerHTML = _galleryPicker.assets.map(asset =>
+      _galleryPickerRenderThumb(asset, _galleryPicker.selected.some(item => String(item.id) === String(asset.id)))
+    ).join('');
+    grid.querySelectorAll('.picker-thumb').forEach((node, index) => {
+      node.addEventListener('click', event => galleryPickerClickAsset(index, event));
+    });
+  }
+  _galleryPickerRenderSelected();
+  const pager = document.getElementById('galleryPickerPager');
+  if (pager) {
+    pager.innerHTML = _galleryPicker.pages > 1
+      ? `<button type="button" class="btn btn-sm btn-ghost" ${_galleryPicker.page <= 1 ? 'disabled' : ''} onclick="loadGalleryPickerPage(${_galleryPicker.page - 1})">上一页</button>
+         <span>第 ${_galleryPicker.page} / ${_galleryPicker.pages} 页 · 共 ${_galleryPicker.total} 张${_galleryPicker.recentOnly ? '（本页按最近 7 天过滤）' : ''}</span>
+         <button type="button" class="btn btn-sm btn-ghost" ${_galleryPicker.page >= _galleryPicker.pages ? 'disabled' : ''} onclick="loadGalleryPickerPage(${_galleryPicker.page + 1})">下一页</button>`
+      : `<span>共 ${_galleryPicker.total} 张${_galleryPicker.recentOnly ? '（按最近 7 天过滤）' : ''}</span>`;
+  }
+}
+
+async function loadGalleryPickerPage(page, hops) {
+  if (!_galleryPicker) return;
+  const target = document.getElementById('erpGalleryPicker');
+  if (target && page === 1) target.innerHTML = '<div style="color:var(--text-tertiary);font-size:13px;padding:8px 0;">正在读取图库...</div>';
+  const params = { page, pageSize: GALLERY_PICKER_PAGE_SIZE };
+  if (_galleryPicker.keyword) params.keyword = _galleryPicker.keyword;
+  const response = await Api.getGallery(params);
+  if (!_galleryPicker) return;
+  const data = response?.code === 200 ? (response.data || {}) : {};
+  const pageSize = Number(data.pageSize || GALLERY_PICKER_PAGE_SIZE);
+  const total = Number(data.total ?? 0);
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  let assets = data.list || [];
+  if (_galleryPicker.recentOnly) assets = assets.filter(_galleryPickerAssetRecent);
+  _galleryPicker.page = Math.min(Math.max(1, page), pages);
+  _galleryPicker.pages = pages;
+  _galleryPicker.total = total;
+  // 最近 7 天过滤后本页为空且还有后续页时，自动往后翻（最多 4 次），保证首屏有图可选
+  if (_galleryPicker.recentOnly && !assets.length && _galleryPicker.page < pages && (hops || 0) < 4) {
+    return loadGalleryPickerPage(_galleryPicker.page + 1, (hops || 0) + 1);
+  }
+  _galleryPicker.assets = assets;
+  _galleryPicker.lastClicked = -1;
+  _galleryPickerRender();
+}
+
+function _galleryPickerDebounceSearch() {
+  clearTimeout(_galleryPickerSearchTimer);
+  _galleryPickerSearchTimer = setTimeout(() => {
+    if (!_galleryPicker) return;
+    const input = document.getElementById('galleryPickerSearch');
+    _galleryPicker.keyword = (input?.value || '').trim();
+    loadGalleryPickerPage(1);
+  }, 300);
+}
+
+function galleryPickerToggleRecent(checked) {
+  if (!_galleryPicker) return;
+  _galleryPicker.recentOnly = !!checked;
+  loadGalleryPickerPage(1);
+}
+
+function galleryPickerClickAsset(index, event) {
+  if (!_galleryPicker) return;
+  const asset = _galleryPicker.assets[index];
+  if (!asset) return;
+  const exists = _galleryPicker.selected.findIndex(item => String(item.id) === String(asset.id));
+  if (event && event.shiftKey && _galleryPicker.lastClicked >= 0) {
+    // Shift 连选：把上次点击到当前之间（按列表顺序）未选的图追加进已选区
+    const start = Math.min(_galleryPicker.lastClicked, index);
+    const end = Math.max(_galleryPicker.lastClicked, index);
+    const order = index >= _galleryPicker.lastClicked ? 1 : -1;
+    for (let cursor = start; cursor <= end; cursor += 1) {
+      const candidate = _galleryPicker.assets[cursor];
+      if (!candidate) continue;
+      if (!_galleryPicker.selected.some(item => String(item.id) === String(candidate.id))) {
+        _galleryPicker.selected.push({ id: candidate.id, url: candidate.url, title: candidate.title || candidate.original_name || '' });
+      }
+    }
+    if (order < 0) {
+      // 反向连选时保持“点击顺序”：把本次新增的逆序修正回来
+      const added = _galleryPicker.selected.slice(-(end - start + 1));
+      const rest = _galleryPicker.selected.slice(0, _galleryPicker.selected.length - added.length);
+      _galleryPicker.selected = rest.concat(added.reverse());
+    }
+    _galleryPicker.lastClicked = index;
+  } else if (exists >= 0) {
+    _galleryPicker.selected.splice(exists, 1);
+    _galleryPicker.lastClicked = index;
+  } else if (_galleryPicker.selected.length >= 30) {
+    Toast.show('最多选择 30 张图库图片', 'warning');
+    return;
+  } else {
+    _galleryPicker.selected.push({ id: asset.id, url: asset.url, title: asset.title || asset.original_name || '' });
+    _galleryPicker.lastClicked = index;
+  }
+  _galleryPickerRender();
+}
+
+function galleryPickerSelectPage() {
+  if (!_galleryPicker) return;
+  let added = 0;
+  _galleryPicker.assets.forEach(asset => {
+    if (_galleryPicker.selected.length >= 30) return;
+    if (_galleryPicker.selected.some(item => String(item.id) === String(asset.id))) return;
+    _galleryPicker.selected.push({ id: asset.id, url: asset.url, title: asset.title || asset.original_name || '' });
+    added += 1;
+  });
+  _galleryPickerRender();
+  Toast.show(added ? `已按当前页顺序追加 ${added} 张` : '本页已全部在已选区或已达上限', added ? 'success' : 'info');
+}
+
+function galleryPickerClear() {
+  if (!_galleryPicker) return;
+  _galleryPicker.selected = [];
+  _galleryPickerRender();
+}
+
+function galleryPickerRemove(index) {
+  if (!_galleryPicker) return;
+  _galleryPicker.selected.splice(index, 1);
+  _galleryPickerRender();
+}
+
+function galleryPickerMove(index, delta) {
+  if (!_galleryPicker) return;
+  const to = index + delta;
+  if (to < 0 || to >= _galleryPicker.selected.length) return;
+  const [item] = _galleryPicker.selected.splice(index, 1);
+  _galleryPicker.selected.splice(to, 0, item);
+  _galleryPickerRender();
+}
+
+function galleryPickerSetMain(index) {
+  if (!_galleryPicker || index <= 0) return;
+  const [item] = _galleryPicker.selected.splice(index, 1);
+  _galleryPicker.selected.unshift(item);
+  _galleryPickerRender();
+}
+
+function galleryPickerReorder(from, to) {
+  if (!_galleryPicker) return;
+  const total = _galleryPicker.selected.length;
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to < 0 || from >= total || to >= total) return;
+  const [item] = _galleryPicker.selected.splice(from, 1);
+  _galleryPicker.selected.splice(to, 0, item);
+  _galleryPickerRender();
+}
+
+/** 从 ERP 图库多选图片并加入当前 SKU（E1/E2）。 */
 async function selectSpaceImage(skuIndex) {
+  _galleryPicker = {
+    skuIndex, page: 1, pages: 1, total: 0, assets: [], selected: [],
+    keyword: '', recentOnly: true, lastClicked: -1, dragFrom: null,
+  };
   Modal.show({
-    title: '选择 ERP 图库图片',
+    title: '选择 ERP 图库图片（顺序即写入顺序）',
     size: 'lg',
-    body: '<div class="sku-image-picker" id="erpGalleryPicker"><div style="color:var(--text-tertiary);font-size:13px;padding:8px 0;">正在读取图库...</div></div>',
+    body: `
+      <div class="gallery-picker-wrap">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
+          <input id="galleryPickerSearch" class="form-input" style="flex:1;min-width:180px;" placeholder="搜索名称/标签/提示词" autocomplete="off">
+          <label style="font-size:12px;color:var(--text-secondary);display:flex;align-items:center;gap:4px;white-space:nowrap;">
+            <input type="checkbox" id="galleryPickerRecent" checked onchange="galleryPickerToggleRecent(this.checked)"> 仅看最近 7 天
+          </label>
+          <button type="button" class="btn btn-sm btn-ghost" onclick="galleryPickerSelectPage()">全选本页（按当前顺序追加）</button>
+          <button type="button" class="btn btn-sm btn-ghost" onclick="galleryPickerClear()">清空已选</button>
+        </div>
+        <div id="erpGalleryPicker" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:8px;max-height:42vh;overflow:auto;padding:4px;">
+          <div style="color:var(--text-tertiary);font-size:13px;padding:8px 0;">正在读取图库...</div>
+        </div>
+        <div id="galleryPickerPager" style="display:flex;gap:8px;align-items:center;justify-content:center;margin:8px 0;font-size:12px;color:var(--text-secondary);"></div>
+        <div style="border-top:1px solid var(--border-color,#e4e7ec);padding-top:8px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <strong style="font-size:13px;">已选区（按点击顺序，可拖拽/箭头调序）</strong>
+            <span id="galleryPickerSelectedCount" style="font-size:12px;color:var(--text-secondary);">0 张</span>
+          </div>
+          <div id="erpGallerySelected" style="display:flex;gap:8px;overflow-x:auto;min-height:110px;padding:4px;"></div>
+        </div>
+      </div>`,
     footer: [
       { text: '取消', class: 'btn-ghost' },
       { text: '添加已选图片', class: 'btn-primary', onClick: () => addSelectedGalleryImages(skuIndex) },
     ],
   });
+  document.getElementById('galleryPickerSearch')?.addEventListener('input', _galleryPickerDebounceSearch);
+  await loadGalleryPickerPage(1);
+}
 
-  const response = await Api.getGallery();
-  const target = document.getElementById('erpGalleryPicker');
-  if (!target) return;
-  const assets = response?.code === 200 ? (response.data?.list || []) : [];
-  if (!assets.length) {
-    target.innerHTML = '<div style="color:var(--text-tertiary);font-size:13px;padding:8px 0;">图库暂无图片，请先在“我的图库”上传或使用 AI 图片生成。</div>';
-    return;
-  }
-  target.innerHTML = assets.map(asset => `
-    <label class="picker-thumb" title="${escapeAttr(asset.title || asset.original_name || '图库图片')}">
-      <input type="checkbox" class="erp-gallery-image-option" value="${escapeAttr(asset.url)}" style="position:absolute;opacity:0;pointer-events:none;">
-      <img src="${escapeAttr(asset.url)}" alt="${escapeAttr(asset.title || '图库图片')}" loading="lazy">
-    </label>`).join('');
-  target.querySelectorAll('.erp-gallery-image-option').forEach(input => {
-    input.addEventListener('change', () => input.parentElement.classList.toggle('is-selected', input.checked));
+/** 提交前顺序确认：可再调序、可撤销；确认后严格按数组顺序写入 SKU。 */
+function addSelectedGalleryImages(skuIndex) {
+  if (!_galleryPicker) return;
+  const selected = _galleryPicker.selected.slice();
+  if (!selected.length) return Toast.show('请至少选择一张图库图片', 'warning');
+  const snapshot = selected.slice();
+  _galleryPicker.confirmSelected = selected.slice();
+  const body = () => `
+    <p style="font-size:13px;color:var(--text-secondary);margin:0 0 8px;">以下顺序即写入 SKU 的最终顺序（第 1 张为主图）；可继续用 ← → 或拖拽调整。</p>
+    <div id="galleryOrderConfirmList" style="display:flex;gap:8px;flex-wrap:wrap;max-height:46vh;overflow:auto;"></div>`;
+  Modal.show({
+    title: '确认图片顺序',
+    size: 'lg',
+    body: body(),
+    footer: [
+      { text: '返回调整', class: 'btn-ghost' },
+      { text: '撤销本次调整', class: 'btn-ghost', onClick: () => { _galleryPicker.confirmSelected = snapshot.slice(); _galleryPickerRenderConfirmList(); } },
+      { text: '确认写入', class: 'btn-primary', onClick: () => galleryPickerConfirmOrder(skuIndex) },
+    ],
+  });
+  _galleryPickerRenderConfirmList();
+}
+
+function _galleryPickerRenderConfirmList() {
+  const box = document.getElementById('galleryOrderConfirmList');
+  if (!box) return;
+  const list = _galleryPicker?.confirmSelected || [];
+  box.innerHTML = list.map((item, index) => `
+    <div class="picker-selected-item" draggable="true" data-confirm-index="${index}" style="position:relative;width:96px;text-align:center;">
+      <div style="position:absolute;left:2px;top:2px;background:#1f2937;color:#fff;border-radius:10px;min-width:18px;height:18px;line-height:18px;font-size:11px;z-index:2;">${index + 1}</div>
+      <img src="${escapeAttr(item.url)}" alt="" style="width:96px;height:96px;object-fit:cover;border-radius:6px;border:1px solid var(--border-color,#e4e7ec);">
+      <div style="display:flex;gap:2px;justify-content:center;margin-top:2px;">
+        <button type="button" class="btn btn-xs btn-ghost" onclick="galleryPickerConfirmMove(${index}, -1)">←</button>
+        <button type="button" class="btn btn-xs btn-ghost" onclick="galleryPickerConfirmMove(${index}, 1)">→</button>
+      </div>
+    </div>`).join('');
+  box.querySelectorAll('[data-confirm-index]').forEach(node => {
+    node.addEventListener('dragstart', event => { _galleryPicker.confirmDragFrom = Number(node.dataset.confirmIndex); try { event.dataTransfer.setData('text/plain', node.dataset.confirmIndex); } catch (_) {} });
+    node.addEventListener('dragover', event => event.preventDefault());
+    node.addEventListener('drop', event => {
+      event.preventDefault();
+      galleryPickerConfirmReorder(_galleryPicker.confirmDragFrom ?? Number(event.dataTransfer?.getData('text/plain')), Number(node.dataset.confirmIndex));
+    });
   });
 }
 
-function addSelectedGalleryImages(skuIndex) {
-  const urls = Array.from(document.querySelectorAll('.erp-gallery-image-option:checked')).map(input => input.value);
-  if (!urls.length) return Toast.show('请至少选择一张图库图片', 'warning');
+function galleryPickerConfirmMove(index, delta) {
+  if (!_galleryPicker?.confirmSelected) return;
+  const to = index + delta;
+  const list = _galleryPicker.confirmSelected;
+  if (to < 0 || to >= list.length) return;
+  const [item] = list.splice(index, 1);
+  list.splice(to, 0, item);
+  _galleryPickerRenderConfirmList();
+}
+
+function galleryPickerConfirmReorder(from, to) {
+  if (!_galleryPicker?.confirmSelected) return;
+  const list = _galleryPicker.confirmSelected;
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to < 0 || from >= list.length || to >= list.length) return;
+  const [item] = list.splice(from, 1);
+  list.splice(to, 0, item);
+  _galleryPickerRenderConfirmList();
+}
+
+function galleryPickerConfirmOrder(skuIndex) {
+  if (!_galleryPicker?.confirmSelected) return;
+  const urls = _galleryPicker.confirmSelected.map(item => item.url).filter(Boolean);
   const images = window._skuImages[skuIndex] || (window._skuImages[skuIndex] = []);
-  let added = 0;
+  const before = images.length;
   urls.forEach(url => {
-    if (images.length < 30 && !images.includes(url)) {
-      images.push(url);
-      added++;
-    }
+    if (images.length < 30 && !images.includes(url)) images.push(url);
   });
+  const added = images.length - before;
+  _galleryPicker = null;
+  Modal.close();
   refreshSkuImageCell(skuIndex);
-  if (added) {
-    Modal.close();
-    Toast.show(`已添加 ${added} 张 ERP 图库图片`, 'success');
-  } else {
-    Toast.show('图片已存在或已达上限', 'info');
-  }
+  if (added) Toast.show(`已按确认顺序写入 ${added} 张图库图片（第 1 张为主图）`, 'success');
+  else Toast.show('所选图片已存在或已达上限', 'info');
 }
 
 /** 使用网络图片（URL输入弹窗） */

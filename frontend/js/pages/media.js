@@ -1,6 +1,10 @@
 /** 我的图库与 AI 图片生成。 */
 let galleryAssets = [];
 let galleryFilter = { keyword: '', source: '', favorite: '' };
+// 需求 C1 前端：图库页分页（每页 24），总数用后端 total，列表用 prompt_preview
+const GALLERY_PAGE_SIZE = 24;
+let galleryPage = 1;
+let galleryTotal = 0;
 
 function renderGalleryPage() {
   setTimeout(loadGalleryAssets, 0);
@@ -25,6 +29,7 @@ function renderGalleryPage() {
         <span class="media-count" id="galleryCount">0 张</span>
       </div>
       <div class="gallery-grid" id="galleryGrid"><div class="media-loading">正在读取图库...</div></div>
+      <div class="gallery-pager" id="galleryPager" style="display:flex;align-items:center;justify-content:center;gap:10px;margin:16px 0 4px;font-size:13px;color:var(--text-secondary);"></div>
     </div>`;
 }
 
@@ -92,17 +97,44 @@ function renderAIImagePage() {
 }
 
 async function loadGalleryAssets() {
-  const response = await Api.getGallery(galleryFilter);
-  galleryAssets = response?.code === 200 ? (response.data?.list || []) : [];
+  const params = { ...galleryFilter, page: galleryPage, pageSize: GALLERY_PAGE_SIZE };
+  const response = await Api.getGallery(params);
+  const data = response?.code === 200 ? (response.data || {}) : {};
+  galleryAssets = data.list || [];
+  galleryTotal = Number(data.total ?? galleryAssets.length);
   renderGalleryGrid('galleryGrid', galleryAssets);
   const count = document.getElementById('galleryCount');
-  if (count) count.textContent = `${galleryAssets.length} 张`;
+  if (count) count.textContent = `${galleryTotal} 张`;
+  renderGalleryPager();
+}
+
+function galleryPageCount() {
+  return Math.max(1, Math.ceil(galleryTotal / GALLERY_PAGE_SIZE));
+}
+
+function renderGalleryPager() {
+  const box = document.getElementById('galleryPager');
+  if (!box) return;
+  if (galleryTotal <= GALLERY_PAGE_SIZE) { box.innerHTML = ''; return; }
+  const pages = galleryPageCount();
+  const prevDisabled = galleryPage <= 1;
+  const nextDisabled = galleryPage >= pages;
+  box.innerHTML = `
+    <button class="btn btn-sm btn-ghost" ${prevDisabled ? 'disabled' : ''} onclick="gotoGalleryPage(${galleryPage - 1})">上一页</button>
+    <span>第 ${galleryPage} / ${pages} 页 · 共 ${galleryTotal} 张</span>
+    <button class="btn btn-sm btn-ghost" ${nextDisabled ? 'disabled' : ''} onclick="gotoGalleryPage(${galleryPage + 1})">下一页</button>`;
+}
+
+function gotoGalleryPage(page) {
+  const pages = galleryPageCount();
+  galleryPage = Math.min(Math.max(1, Number(page) || 1), pages);
+  loadGalleryAssets();
 }
 
 function galleryCard(asset) {
   const tags = (asset.tags || []).slice(0, 2).map(tag => `<span>${escapeHtml(tag)}</span>`).join('');
   return `<article class="gallery-item" data-id="${asset.id}">
-    <button class="gallery-preview" onclick="showGalleryAsset('${asset.id}')"><img src="${escapeAttr(asset.url)}" alt="${escapeAttr(asset.title)}" loading="lazy"></button>
+    <button class="gallery-preview" onclick="showGalleryAsset('${asset.id}')"><img src="${escapeAttr(asset.thumb_url || asset.url)}" alt="${escapeAttr(asset.title)}" loading="lazy" onerror="this.onerror=null;this.src='${escapeAttr(asset.url)}';"></button>
     <div class="gallery-meta"><div><strong title="${escapeAttr(asset.title)}">${escapeHtml(asset.title)}</strong><small>${asset.source === 'ai' ? 'AI 生成' : '本地上传'} · ${formatFileSize(asset.file_size)}</small></div>
       <button class="gallery-star ${asset.favorite ? 'active' : ''}" title="收藏" onclick="toggleGalleryFavorite('${asset.id}')"><i data-lucide="star"></i></button></div>
     ${tags ? `<div class="gallery-tags">${tags}</div>` : ''}
@@ -126,10 +158,10 @@ async function uploadGalleryFiles(files) {
 
 function setGallerySource(button, source) {
   document.querySelectorAll('.media-segments button').forEach(item => item.classList.remove('active')); button.classList.add('active');
-  galleryFilter.source = source === 'favorite' ? '' : source; galleryFilter.favorite = source === 'favorite' ? '1' : ''; loadGalleryAssets();
+  galleryFilter.source = source === 'favorite' ? '' : source; galleryFilter.favorite = source === 'favorite' ? '1' : ''; galleryPage = 1; loadGalleryAssets();
 }
 let gallerySearchTimer;
-function debounceGallerySearch(value) { clearTimeout(gallerySearchTimer); gallerySearchTimer = setTimeout(() => { galleryFilter.keyword = value.trim(); loadGalleryAssets(); }, 300); }
+function debounceGallerySearch(value) { clearTimeout(gallerySearchTimer); gallerySearchTimer = setTimeout(() => { galleryFilter.keyword = value.trim(); galleryPage = 1; loadGalleryAssets(); }, 300); }
 function findGalleryAsset(id) { return galleryAssets.find(item => String(item.id) === String(id)); }
 async function toggleGalleryFavorite(id) { const item=findGalleryAsset(id); if(!item)return; await Api.updateGalleryAsset(id,{favorite:!item.favorite}); loadGalleryAssets(); }
 async function copyGalleryUrl(id) { const item=findGalleryAsset(id); if(!item)return; await navigator.clipboard.writeText(new URL(item.url, location.origin).href); Toast.show('图片链接已复制','success'); }
@@ -138,7 +170,7 @@ function formatFileSize(bytes){const n=Number(bytes||0);return n>=1048576?(n/104
 
 function showGalleryAsset(id) {
   const item=findGalleryAsset(id); if(!item)return;
-  Modal.show({title:item.title,size:'lg',body:`<div class="gallery-detail"><img src="${escapeAttr(item.url)}" alt=""><div><p><b>来源</b>${item.source==='ai'?'AI 生成':'本地上传'}</p><p><b>文件大小</b>${formatFileSize(item.file_size)}</p><p><b>创建时间</b>${item.created_at}</p>${item.prompt?`<p><b>提示词</b>${escapeHtml(item.prompt)}</p>`:''}</div></div>`,footer:[{text:'关闭',class:'btn-ghost'},{text:'复制链接',class:'btn-primary',onClick:()=>copyGalleryUrl(id)}]});
+  Modal.show({title:item.title,size:'lg',body:`<div class="gallery-detail"><img src="${escapeAttr(item.url)}" alt=""><div><p><b>来源</b>${item.source==='ai'?'AI 生成':'本地上传'}</p><p><b>文件大小</b>${formatFileSize(item.file_size)}</p><p><b>创建时间</b>${item.created_at}</p>${(item.prompt || item.prompt_preview)?`<p><b>提示词</b>${escapeHtml(item.prompt || item.prompt_preview)}${!item.prompt && item.prompt_truncated ? '（列表为截断预览）' : ''}</p>`:''}</div></div>`,footer:[{text:'关闭',class:'btn-ghost'},{text:'复制链接',class:'btn-primary',onClick:()=>copyGalleryUrl(id)}]});
 }
 
 let aiImageReference = null;
