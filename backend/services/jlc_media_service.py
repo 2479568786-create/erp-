@@ -20,7 +20,7 @@ import urllib.error
 import urllib.request
 
 API_BASE = 'https://api.lk888.ai/api'
-MODEL = 'banana-2.1'
+MODEL = 'tt-image-2'
 POLL_INTERVAL = 5
 DEFAULT_TIMEOUT = 300
 

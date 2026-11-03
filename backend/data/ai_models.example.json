@@ -45,9 +45,13 @@
       "name": "作图",
       "api_key": "",
       "base_url": "https://api.lk888.ai/v1",
-      "model": "banana-2.1",
+      "model": "tt-image-2",
+      "models": [
+        { "id": "tt-image-2", "label": "TT Image 2", "api_key": "", "enabled": true, "cost_hint": 0.0455 },
+        { "id": "banana-2.1", "label": "香蕉 2.1", "api_key": "", "enabled": true, "cost_hint": 0.104 }
+      ],
       "enabled": true,
-      "description": "凌科 AI 生图（banana-2.1，/v1/media 异步协议）"
+      "description": "凌科 AI 生图（默认 tt-image-2 / 0.2 点，列表第一项即默认；banana-2.1 0.37 点仅按需选）"
     },
     "shangdekuai_lingke": {
       "name": "上得快 · 凌科 AI（文本）",
@@ -62,6 +66,7 @@
   "image_billing": {
     "price_points_per_image": 0.37,
     "currency": "CNY",
-    "updated_at": "2026-10-28 00:32:35"
+    "updated_at": "2026-10-28 00:32:35",
+    "price_points_by_model": { "banana-2.1": 0.37, "tt-image-2": 0.2 }
   }
 }

@@ -360,7 +360,7 @@ def gallery_file(filename):
     return send_from_directory(GALLERY_DIR, os.path.basename(filename))
 
 
-JLC_MODEL = 'banana-2.1'
+JLC_MODEL = 'tt-image-2'
 
 
 def _resolve_image_model(requested):
