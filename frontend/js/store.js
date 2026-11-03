@@ -69,6 +69,11 @@ const Store = (() => {
    * @param {string} [source] - 变更来源标识（用于调试）
    */
   function setState(partial, source) {
+    // 值完全没变就不通知订阅者（2026-11-04）：否则重复 setState 会反复触发页面重新拉数据，
+    // 配合 401 会打成请求风暴。引用相同/值相同一律短路。
+    const changedKeys = Object.keys(partial || {});
+    if (changedKeys.length && changedKeys.every((key) => state[key] === partial[key])) return;
+
     const prevState = { ...state };
     state = { ...state, ...partial };
 

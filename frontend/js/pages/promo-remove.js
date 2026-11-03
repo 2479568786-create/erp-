@@ -854,6 +854,18 @@ const PromoRemovePage = (() => {
         { text: '查看详情', class: 'btn-primary', onClick: () => { Router.navigate('/promo-remove'); return true; } },
       ],
     });
+    // 2026-11-04：这是登录后自动弹的提醒，原来的全屏遮罩会吃掉整页点击
+    //（实测点在 AI 生图页「开始生成」上，elementFromPoint 拿到的是 .modal-overlay）。
+    // 改成「遮罩不接收点击、只有对话框本身可点」，页面照常可操作，Esc 仍可关。
+    try {
+      const overlays = document.querySelectorAll('.modal-overlay');
+      const overlay = overlays[overlays.length - 1];
+      if (overlay) {
+        overlay.style.pointerEvents = 'none';
+        const dialog = overlay.querySelector('.modal-dialog');
+        if (dialog) dialog.style.pointerEvents = 'auto';
+      }
+    } catch (e) { /* noop */ }
   }
 
   async function checkAlerts() {

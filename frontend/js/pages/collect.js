@@ -245,6 +245,8 @@ function updateTabCounts() {
 
 /** 渲染表格 */
 function loadProducts() {
+  // 未登录不拉数据（2026-11-04）：401 再来一次会让「清登录态 → 订阅者 → 重新拉取」无限循环
+  if (!Store?.getToken?.()) return;
   const tbody = document.getElementById('collectTableBody');
   const emptyEl = document.getElementById('emptyState');
   const footerBar = document.getElementById('collectFooterBar');
@@ -10847,7 +10849,8 @@ if (!window._brandDropdownEventsBound) {
 
 // 页面渲染后加载数据的钩子
 Store.subscribe((state) => {
-  if (state.currentPage === 'collect') {
+  // 未登录不再触发拉取（2026-11-04）：这是 401 请求风暴的放大环节
+  if (state.currentPage === 'collect' && state.token) {
     setTimeout(loadProducts, 50);
   }
 });

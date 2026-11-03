@@ -12,6 +12,11 @@ const Api = (() => {
   // 请求超时时间（毫秒）
   const TIMEOUT = 15000;
 
+  // 401 短路（2026-11-04）：同一轮会话只清一次登录态。
+  // 否则 401 → Store.setState → 页面订阅者重新拉数据 → 又 401，会打成每秒数条的请求风暴。
+  let authExpiredHandledAt = 0;
+  const AUTH_EXPIRED_COOLDOWN = 30000;
+
   /**
    * 核心请求方法
    * @param {string} endpoint - API 路径（如 /api/products）
@@ -59,7 +64,13 @@ const Api = (() => {
       if (data.code !== 200) {
         // 账号墙：Token 失效 / 未登录 → 踢回登录门禁（user/info 自身除外，避免循环）
         if (data.code === 401 && !endpoint.includes('/user/info')) {
-          Store?.setState?.({ user: null, token: null }, 'api-401');
+          const hadToken = !!Store?.getToken?.();
+          const now = Date.now();
+          // 只有「手上真的还有 token」且不在冷却期，才清登录态并通知订阅者一次
+          if (hadToken && now - authExpiredHandledAt > AUTH_EXPIRED_COOLDOWN) {
+            authExpiredHandledAt = now;
+            Store?.setState?.({ user: null, token: null }, 'api-401');
+          }
           if (window.LoginGate && !window.LoginGate.isShown()) window.LoginGate.show();
         }
         // 越权提示：业务员触碰到管理员功能时给出明确提示

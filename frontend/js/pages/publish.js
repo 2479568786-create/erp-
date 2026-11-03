@@ -129,6 +129,8 @@ function renderPublishPage(route) {
 // ===== 数据加载 =====
 
 async function loadPublishData() {
+  // 未登录不拉数据（2026-11-04）：与采集箱同样的 401 死循环防线
+  if (!Store?.getToken?.()) return;
   const tbody = document.getElementById('publishTableBody');
   const emptyEl = document.getElementById('publishEmpty');
   const footerEl = document.getElementById('publishFooterBar');
@@ -478,7 +480,7 @@ function formatPubTime(isoStr) {
 Router.register('/publish', renderPublishPage);
 
 Store.subscribe((state) => {
-  if (state.currentPage === 'publish') {
+  if (state.currentPage === 'publish' && state.token) {
     setTimeout(loadPublishData, 80);
   }
 });
