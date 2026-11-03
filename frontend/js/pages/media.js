@@ -201,10 +201,10 @@ function aiModelOptionsHtml() {
 }
 // 生图模型状态（2026-11-04）：只用凌科 AI 的图片模型判断是否可用，
 // 不再用 /api/ai/models/status（那是文本模型的 active provider，会误显示 DeepSeek）。
-let aiImageModelState = { checked: false, ready: false, error: '', models: [], providerName: '凌科 AI' };
+let aiImageModelState = { checked: false, ready: false, blocking: false, error: '', models: [], providerName: '凌科 AI' };
 
 async function loadAIImageModels() {
-  let state = { checked: true, ready: false, error: '', models: [], providerName: '凌科 AI' };
+  let state = { checked: true, ready: false, blocking: false, error: '', models: [], providerName: '凌科 AI' };
   try {
     const response = await Api.getAIModels();
     if (response?.code === 200) {
@@ -223,10 +223,14 @@ async function loadAIImageModels() {
         models: usable,
         providerName: '凌科 AI',
       };
+      // 只有「确定不可用」才禁用按钮：401 / 未配 Key / 有 Key 但没有启用模型。
+      // 临时网络错误不禁用——让用户点，后端会回真实原因。
+      state.blocking = state.error !== '';
     } else {
       state.error = response?.code === 401
         ? '登录已过期，请重新登录后再生成'
         : (response?.msg || '读取图片模型配置失败');
+      state.blocking = response?.code === 401;
     }
   } catch (error) {
     state.error = '读取图片模型配置失败：' + (error?.message || error);
@@ -346,7 +350,7 @@ async function generateAIImage() {
     Toast.show('请输入图片描述', 'warning');
     return;
   }
-  if (aiImageModelState.checked && !aiImageModelState.ready) {
+  if (aiImageModelState.checked && !aiImageModelState.ready && aiImageModelState.blocking !== false) {
     showAIImagePromptHint(aiImageModelState.error || '图片模型不可用，请前往模型管理检查凌科 AI 配置');
     Toast.show(aiImageModelState.error || '图片模型不可用', 'error');
     return;
@@ -500,7 +504,7 @@ function renderAIImageModelState() {
 function updateGenerateButtonState() {
   const btn = document.getElementById('generateImageBtn');
   if (!btn) return;
-  const blocked = aiImageModelState.checked && !aiImageModelState.ready;
+  const blocked = aiImageModelState.checked && !aiImageModelState.ready && aiImageModelState.blocking !== false;
   if (blocked) {
     btn.disabled = true;
     btn.title = aiImageModelState.error || '图片模型不可用';
