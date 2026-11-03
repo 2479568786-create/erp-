@@ -27,8 +27,10 @@ os.makedirs(GALLERY_DIR, exist_ok=True)
 # The gallery is persistent data and may have been restored from an archive with
 # file-like permissions (for example 0640). A directory needs the execute bit
 # for its owner to create and open files inside it.
+# 需求 C2：nginx 直出 /api/gallery/files/ 需要 worker（nginx 用户）能穿越该目录，
+# 因此这里给 other 只加 x（0o751）：可打开已知文件名，但不能列目录。
 try:
-    os.chmod(GALLERY_DIR, 0o750)
+    os.chmod(GALLERY_DIR, 0o751)
 except OSError:
     pass
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
@@ -53,6 +55,27 @@ def _row_to_dict(row):
         item['tags'] = []
     item['url'] = f"/api/gallery/files/{item['filename']}"
     return item
+
+
+# 图库列表瘦身（需求 C1）：列表不回传 prompt 全文，只给 120 字预览；
+# thumb_url 在缩略图（D1）落地前先复用原图地址，落地后改为 /api/gallery/thumbs/<name>。
+GALLERY_LIST_PROMPT_PREVIEW = 120
+GALLERY_LIST_FIELDS = (
+    'filename', 'original_name', 'title', 'file_size', 'mime_type', 'source',
+    'product_id', 'module_key', 'request_id', 'created_at', 'user_id',
+)
+
+
+def _row_to_list_item(row):
+    item = _row_to_dict(row)
+    slim = {'id': item['id'], 'url': item['url'], 'thumb_url': item['url'],
+            'favorite': item['favorite'], 'tags': item['tags']}
+    for field in GALLERY_LIST_FIELDS:
+        slim[field] = item.get(field)
+    prompt = str(item.get('prompt') or '')
+    slim['prompt_preview'] = prompt[:GALLERY_LIST_PROMPT_PREVIEW]
+    slim['prompt_truncated'] = len(prompt) > GALLERY_LIST_PROMPT_PREVIEW
+    return slim
 
 
 def _folder_to_dict(row):
@@ -150,8 +173,46 @@ def list_gallery():
     if favorite in ('1', 'true'):
         conditions.append('favorite = 1')
     where = (' WHERE ' + ' AND '.join(conditions)) if conditions else ''
+
+    # 需求 C1：分页 + 列表瘦身。
+    # 兼容期策略（ERP改造 2026-11-03）：
+    #   带 page / pageSize 任一参数 → 分页瘦身模式（pageSize 默认 24，上限 100）；
+    #   两者都不带 → 保持旧行为返回全量（前端图库页尚未迁移，避免直接打断选图），
+    #   但列表项同样带 prompt_preview，且响应里标记 paginated=false，前端迁移后改传 page/pageSize 即可。
+    raw_page = request.args.get('page')
+    raw_page_size = request.args.get('pageSize', request.args.get('page_size'))
+    paginated = raw_page not in (None, '') or raw_page_size not in (None, '')
+    if paginated:
+        try:
+            page = max(int(raw_page or 1), 1)
+            page_size = int(raw_page_size or 24)
+        except (TypeError, ValueError):
+            return error_response('page / pageSize 必须是正整数', 400)
+        if page_size < 1:
+            page_size = 24
+        page_size = min(page_size, 100)
+        total_row = query(f'SELECT COUNT(*) AS c FROM gallery_assets{where}', params, one=True)
+        total = int((total_row or {}).get('c') or 0)
+        rows = query(
+            f'SELECT * FROM gallery_assets{where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?',
+            list(params) + [page_size, (page - 1) * page_size],
+        )
+        return success_response(data={
+            'list': [_row_to_list_item(row) for row in rows],
+            'total': total,
+            'page': page,
+            'pageSize': page_size,
+            'paginated': True,
+        })
+
     rows = query(f'SELECT * FROM gallery_assets{where} ORDER BY created_at DESC', params)
-    return success_response(data={'list': [_row_to_dict(row) for row in rows], 'total': len(rows)})
+    return success_response(data={
+        'list': [_row_to_dict(row) for row in rows],
+        'total': len(rows),
+        'page': 1,
+        'pageSize': len(rows),
+        'paginated': False,
+    })
 
 
 @gallery_bp.route('/gallery/folders', methods=['GET'])
