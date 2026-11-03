@@ -34,7 +34,9 @@ function renderGalleryPage() {
 }
 
 function renderAIImagePage() {
-  setTimeout(() => { loadAIGenerationHistory(); loadAIImageModels(); Api.getAIModelsStatus().then(showImageModelStatus); toggleAIImageProvider(); sdqApplyImageContext(); loadAIPointBalance(); }, 0);
+  // 2026-11-04 修状态条：原来调 /api/ai/models/status（那是「文本」模型的 active provider，
+  // 会显示成「DeepSeek 已配置」），现在统一由 loadAIImageModels() 用凌科 AI 的图片模型渲染状态。
+  setTimeout(() => { loadAIGenerationHistory(); loadAIImageModels(); toggleAIImageProvider(); sdqApplyImageContext(); loadAIPointBalance(); }, 0);
   return `
     <div class="media-page ai-image-page">
       <div class="media-page-head">
@@ -59,7 +61,8 @@ function renderAIImagePage() {
             <span>用于保留商品外观并重新设计背景与构图</span>
           </div>
           <label class="media-label">图片描述</label>
-          <textarea id="aiImagePrompt" class="form-textarea" rows="8" maxlength="2000" placeholder="例如：白色背景中的黑色全自动防风雨伞，商品摄影，完整展示伞面与手柄，柔和棚拍光线，无文字"></textarea>
+          <textarea id="aiImagePrompt" class="form-textarea" rows="8" maxlength="2000" placeholder="例如：白色背景中的黑色全自动防风雨伞，商品摄影，完整展示伞面与手柄，柔和棚拍光线，无文字" oninput="clearAIImagePromptHint()"></textarea>
+          <div id="aiImagePromptHint" style="display:none;font-size:12px;color:#dc2626;margin:-4px 0 8px;line-height:1.6;"></div>
           <div class="media-form-row">
             <div><label class="media-label">画面比例</label><select id="aiImageSize" class="form-select"><option value="1024x1024">1:1 方图</option><option value="1024x1360">3:4 竖图</option><option value="1024x1536">2:3 竖图</option><option value="1536x1024">3:2 横图</option></select></div>
             <div><label class="media-label">生成数量</label><select id="aiImageCount" class="form-select"><option value="1">1 张</option><option value="2">2 张</option><option value="4">4 张</option></select></div>
@@ -196,15 +199,39 @@ function aiModelText(model) { return `${model.label || model.id} · ${Number(mod
 function aiModelOptionsHtml() {
   return aiImageModels.map(model => `<option value="${escapeAttr(model.id)}">${escapeHtml(aiModelText(model))}</option>`).join('');
 }
+// 生图模型状态（2026-11-04）：只用凌科 AI 的图片模型判断是否可用，
+// 不再用 /api/ai/models/status（那是文本模型的 active provider，会误显示 DeepSeek）。
+let aiImageModelState = { checked: false, ready: false, error: '', models: [], providerName: '凌科 AI' };
+
 async function loadAIImageModels() {
+  let state = { checked: true, ready: false, error: '', models: [], providerName: '凌科 AI' };
   try {
     const response = await Api.getAIModels();
-    const list = response?.code === 200 ? (response.data?.providers?.lingkeai?.models || []) : [];
-    const usable = (Array.isArray(list) ? list : [])
-      .filter(model => model && model.id && model.enabled !== false && model.has_key !== false)
-      .map(model => ({id:model.id, label:model.label || model.id, points:Number(model.points || 0)}));
-    if (usable.length) aiImageModels = usable;
-  } catch (_) { /* 保留兜底列表 */ }
+    if (response?.code === 200) {
+      const provider = response.data?.providers?.lingkeai || {};
+      const list = Array.isArray(provider.models) ? provider.models : [];
+      const usable = list
+        .filter(model => model && model.id && model.enabled !== false && model.has_key !== false)
+        .map(model => ({id:model.id, label:model.label || model.id, points:Number(model.points || 0)}));
+      if (usable.length) aiImageModels = usable;
+      state = {
+        checked: true,
+        ready: provider.has_key !== false && usable.length > 0,
+        error: provider.has_key === false
+          ? '凌科 AI 未配置 API Key，请前往模型管理'
+          : (usable.length ? '' : '凌科 AI 没有启用的图片模型'),
+        models: usable,
+        providerName: '凌科 AI',
+      };
+    } else {
+      state.error = response?.code === 401
+        ? '登录已过期，请重新登录后再生成'
+        : (response?.msg || '读取图片模型配置失败');
+    }
+  } catch (error) {
+    state.error = '读取图片模型配置失败：' + (error?.message || error);
+  }
+  aiImageModelState = state;
   ['aiImageModel', 'aiSuiteModel'].forEach(id => {
     const select = document.getElementById(id);
     if (!select) return;
@@ -213,6 +240,7 @@ async function loadAIImageModels() {
     select.value = aiImageModels.some(model => model.id === current) ? current : (aiImageModels[0]?.id || 'banana-2.1');
   });
   updateAIImageModelHint();
+  renderAIImageModelState();
 }
 function selectedAIImageModel(id) {
   const value = document.getElementById(id)?.value;
@@ -311,11 +339,23 @@ function buildAISuitePrompt(module, userPrompt, ratio, plan = {}) {
 
 async function generateAIImage() {
   const prompt = document.getElementById('aiImagePrompt')?.value.trim();
-  if (!prompt) return Toast.show('请输入图片描述', 'warning');
+  if (!prompt) {
+    // 2026-11-04：空描述以前只弹一个 3 秒 toast，用户容易看成「点了没反应」，改成输入框下方常驻提示 + 聚焦
+    showAIImagePromptHint('请先填写图片描述（例如：白色背景中的黑色雨伞，商品摄影，柔和棚拍光线，无文字）');
+    document.getElementById('aiImagePrompt')?.focus();
+    Toast.show('请输入图片描述', 'warning');
+    return;
+  }
+  if (aiImageModelState.checked && !aiImageModelState.ready) {
+    showAIImagePromptHint(aiImageModelState.error || '图片模型不可用，请前往模型管理检查凌科 AI 配置');
+    Toast.show(aiImageModelState.error || '图片模型不可用', 'error');
+    return;
+  }
+  clearAIImagePromptHint();
   const size = document.getElementById('aiImageSize')?.value || '1024x1024';
   const count = Number(document.getElementById('aiImageCount')?.value || 1);
   const btn = document.getElementById('generateImageBtn');
-  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="media-spinner"></span> 正在生成'; }
+  if (btn) { btn.disabled = true; btn.dataset.generating = '1'; btn.innerHTML = '<span class="media-spinner"></span> 正在生成'; }
   try {
     const response = await Api.request('/api/ai/images/generate', {
       method: 'POST',
@@ -330,15 +370,24 @@ async function generateAIImage() {
         model: selectedAIImageModel('aiImageModel'),
       }),
     });
-    if (response?.code !== 200) return Toast.show(response?.msg || '生成失败', 'error');
+    if (response?.code !== 200) {
+      const message = response?.code === 401
+        ? '登录已过期，请重新登录后再生成'
+        : (response?.msg || '生成失败');
+      showAIImagePromptHint(message);
+      return Toast.show(message, 'error');
+    }
+    showAIImagePromptHint('');
     Toast.show(response.msg || '生成完成', 'success');
     await loadAIGenerationHistory();
     loadAIPointBalance();
   } finally {
     if (btn) {
       btn.disabled = false;
+      btn.dataset.generating = '';
       btn.innerHTML = '<i data-lucide="wand-sparkles"></i> 开始生成';
       if (window.lucide) lucide.createIcons();
+      updateGenerateButtonState();
     }
   }
 }
@@ -430,7 +479,45 @@ function selectAIImageReference(file){
   reader.readAsDataURL(file);
 }
 function clearAIImageReference(){aiImageReference=null;const box=document.getElementById('aiImageReferenceBox');if(box)box.innerHTML='<button type="button" class="btn btn-sm btn-ghost" onclick="document.getElementById(\'aiImageReferenceInput\').click()"><i data-lucide="upload"></i> 上传商品参考图</button><span>用于保留商品外观并重新设计背景与构图</span>';if(window.lucide)lucide.createIcons();}
-function showImageModelStatus(response) { const el=document.getElementById('aiImageModelState');if(!el)return;const ok=response?.code===200&&response.data?.has_key;el.classList.toggle('ready',ok);el.innerHTML=`<span class="state-dot"></span><span>${ok?`${escapeHtml(response.data.name||response.data.provider)} 已配置`:'未配置图片 API，请前往模型管理'}</span>`; }
+function renderAIImageModelState() {
+  const el = document.getElementById('aiImageModelState');
+  if (!el) return;
+  const state = aiImageModelState;
+  if (!state.checked) {
+    el.classList.remove('ready');
+    el.innerHTML = '<span class="state-dot"></span><span>正在读取图片模型配置...</span>';
+    updateGenerateButtonState();
+    return;
+  }
+  el.classList.toggle('ready', state.ready);
+  const detail = state.models.map(model => `${model.label || model.id} · ${Number(model.points || 0)} 点/张`).join(' / ');
+  el.innerHTML = state.ready
+    ? `<span class="state-dot"></span><span>${escapeHtml(state.providerName)} · ${escapeHtml(detail)} 已配置</span>`
+    : `<span class="state-dot"></span><span>${escapeHtml(state.error || '图片模型不可用')}</span>`;
+  updateGenerateButtonState();
+}
+
+function updateGenerateButtonState() {
+  const btn = document.getElementById('generateImageBtn');
+  if (!btn) return;
+  const blocked = aiImageModelState.checked && !aiImageModelState.ready;
+  if (blocked) {
+    btn.disabled = true;
+    btn.title = aiImageModelState.error || '图片模型不可用';
+  } else if (btn.dataset.generating !== '1') {
+    btn.disabled = false;
+    btn.title = '';
+  }
+}
+
+function showAIImagePromptHint(message) {
+  const hint = document.getElementById('aiImagePromptHint');
+  if (!hint) return;
+  hint.textContent = message || '';
+  hint.style.display = message ? 'block' : 'none';
+}
+
+function clearAIImagePromptHint() { showAIImagePromptHint(''); }
 async function loadAIPointBalance() {
   const el = document.getElementById('aiPointBalance');
   if (!el) return;
