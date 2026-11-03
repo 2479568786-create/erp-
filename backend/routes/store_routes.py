@@ -2,18 +2,104 @@
 店铺管理 API 路由
 提供店铺的增删改查、批量操作、授权管理等接口
 
-权限模型（v2 账号墙）：
+权限模型（v3：账号墙 + 业务员自助绑定）：
 - 读列表：登录即可；管理员看全量，业务员仅看自己归属（account_id=自己）的店铺
-- 写操作（增/改/删/批量/授权/分组）：仅管理员
+- 建店（绑定）：管理员可绑任意归属、不限量；业务员可自助绑定自己名下店铺，
+  上限 STORE_SELF_BIND_LIMIT（默认 5 家），归属强制为自己（不接受前端传 accountId）
+- 改店：管理员可改任意店铺；业务员只能改自己店铺的 alias/currency/group/clientId/
+  apiKey/authStatus，归属（account_id）不在可改白名单
+- 删店：管理员可删任意；业务员只能删自己店铺，且该店铺必须没有关联业务数据
+  （商品/发布记录/任务/订单/财务/广告/促销/选品等），避免误删把线上数据悬空
+- 批量操作、授权刷新、归属绑定（/api/stores/owner）、分组管理：仍仅管理员
 """
+import os
+
 from flask import Blueprint, request
 from models.account import Store
+from models.product import Product, PublishRecord, PublishTask
 from db import get_connection, query
 from utils.response import success_response, error_response, paginate_response, handle_errors
 from utils.validators import extract_pagination
 from utils.auth import require_login, require_admin, get_current_user
 
 store_bp = Blueprint('store', __name__)
+
+# 业务员自助绑定店铺上限（管理员不受限）
+STORE_SELF_BIND_LIMIT = int(os.environ.get('STORE_SELF_BIND_LIMIT', '') or 5)
+
+# 删除前要检查的关联表：(表名, 列名, 取值口径)  口径 pk=本地 stores.id，ozon=Ozon 店铺 ID
+_STORE_REF_TABLES = (
+    ('online_products', 'store_id', 'pk'),
+    ('seller_insight_title_translations', 'store_id', 'pk'),
+    ('shop_watermarks', 'store_id', 'pk'),
+    ('orders', 'store_id', 'ozon'),
+    ('finance_transactions', 'store_id', 'ozon'),
+    ('finance_sync_state', 'store_id', 'ozon'),
+    ('ad_campaigns', 'store_pk', 'pk'),
+    ('ad_daily_stats', 'store_pk', 'pk'),
+    ('ad_sku_stats', 'store_pk', 'pk'),
+    ('ad_sync_log', 'store_pk', 'pk'),
+    ('promo_product_state', 'store_pk', 'pk'),
+    ('promo_removal_logs', 'store_pk', 'pk'),
+)
+
+
+def _is_admin(user):
+    """当前用户是否管理员"""
+    return bool(user) and user.get('role') == 'admin'
+
+
+def _store_quota(user):
+    """业务员自助绑定配额：管理员/未登录返回 None（不限）"""
+    if not user or _is_admin(user):
+        return None
+    used = Store.count(account_id=user['id'])
+    return {
+        'used': used,
+        'limit': STORE_SELF_BIND_LIMIT,
+        'remaining': max(0, STORE_SELF_BIND_LIMIT - used),
+        'canBind': used < STORE_SELF_BIND_LIMIT,
+    }
+
+
+def _store_usage(store):
+    """统计店铺已关联的业务数据（业务员自助删除前的安全校验）。
+
+    只返回条数 > 0 的项；任何一项非空即视为「有业务数据」，不允许业务员自行删除。
+    """
+    usage = {}
+    if not store:
+        return usage
+    pk = store.get('id')
+    ozon = str(store.get('store_id') or '')
+    for table, column, source in _STORE_REF_TABLES:
+        value = pk if source == 'pk' else ozon
+        if value in (None, ''):
+            continue
+        try:
+            row = query("SELECT COUNT(*) AS n FROM %s WHERE %s = ?" % (table, column), (value,), one=True)
+            n = int((row or {}).get('n') or 0)
+        except Exception:
+            n = 0   # 表不存在（老库/未启用模块）按无数据算
+        if n:
+            usage[table] = n
+    # JSON 数据文件：products 用本地主键，发布记录/任务用 Ozon 店铺 ID
+    try:
+        n = sum(1 for p in Product.find_all() if str(p.get('storeId') or '') == str(pk))
+        if n:
+            usage['products'] = n
+    except Exception:
+        pass
+    for label, model in (('publish_records', PublishRecord), ('publish_tasks', PublishTask)):
+        if not ozon:
+            continue
+        try:
+            n = sum(1 for r in model.find_all() if str(r.get('storeId') or '') == ozon)
+            if n:
+                usage[label] = n
+        except Exception:
+            pass
+    return usage
 
 
 def _owner_name_map():
@@ -84,18 +170,31 @@ def get_stores():
         s['ownerName'] = owner_names.get(s['accountId'], '公共') if s['accountId'] else '公共'
         _mask_store_for_response(s)
 
+    # 业务员：返回自助绑定配额，并标注每家店能否自行删除（有业务数据的不能删）
+    quota = _store_quota(user)
+    if quota is not None:
+        for s in stores:
+            usage = _store_usage(s)
+            s['dataRefs'] = usage
+            s['deletable'] = not usage
+
     return success_response(data={
         "list": stores,
         "total": len(stores),
+        "quota": quota,
     })
 
 
 @store_bp.route('/stores', methods=['POST'])
-@require_admin
 @handle_errors
-@require_admin
+@require_login
 def create_store():
-    """添加店铺（授权绑定）—— 仅管理员"""
+    """添加店铺（授权绑定）。
+
+    管理员：可指定归属、不限量；
+    业务员：自助绑定，归属强制为自己，已达 STORE_SELF_BIND_LIMIT 家时返回 403。
+    """
+    user = get_current_user()
     data = request.get_json() or {}
 
     store_id = data.get('storeId', '').strip()
@@ -115,10 +214,25 @@ def create_store():
     if not alias:
         return error_response("店铺别名不能为空")
 
-    # 检查店铺ID是否已存在
+    # 检查店铺ID是否已存在（防止把别人已绑定的店抢成自己的）
     existing = Store.find_by_store_id(store_id)
     if existing:
         return error_response(f"店铺ID {store_id} 已存在")
+
+    if _is_admin(user):
+        # 管理员：可显式指定归属（保持原行为）
+        account_id = int(account_id) if account_id else None
+    else:
+        # 业务员：自助绑定，归属强制为自己 + 上限校验
+        quota = _store_quota(user)
+        if not quota['canBind']:
+            return error_response(
+                f"您已绑定 {quota['used']} 家店铺，达到自助绑定上限（{quota['limit']} 家）。"
+                f"请先删除没有业务数据的自有店铺以释放名额，或联系管理员代为绑定",
+                403,
+                data={'quota': quota},
+            )
+        account_id = int(user['id'])
 
     store = Store.create(
         store_id=store_id,
@@ -130,7 +244,7 @@ def create_store():
         client_id=client_id or None,
         api_key=api_key or None,
         auth_status=auth_status,
-        account_id=int(account_id) if account_id else None,
+        account_id=account_id,
     )
 
     return success_response(data=_mask_store_for_response(store), msg="店铺添加成功")
@@ -138,14 +252,19 @@ def create_store():
 
 @store_bp.route('/stores/<int:store_pk>', methods=['PUT'])
 @handle_errors
-@require_admin
+@require_login
 def update_store(store_pk):
-    """更新店铺信息 —— 仅管理员"""
+    """更新店铺信息：管理员可改任意店铺；业务员只能改自己店铺（归属不可改）"""
+    user = get_current_user()
     data = request.get_json() or {}
 
     existing = Store.find_by_id(store_pk)
     if not existing:
         return error_response("店铺不存在", 404)
+
+    if not _is_admin(user):
+        if int(existing.get('account_id') or 0) != int(user['id']):
+            return error_response("无权修改该店铺", 403)
 
     # 映射前端字段名到数据库字段名
     field_map = {
@@ -184,14 +303,25 @@ def update_store(store_pk):
 
 
 @store_bp.route('/stores/<int:store_pk>', methods=['DELETE'])
-@require_admin
 @handle_errors
-@require_admin
+@require_login
 def delete_store(store_pk):
-    """删除店铺 —— 仅管理员"""
+    """删除店铺：管理员可删任意；业务员只能删自己且没有关联业务数据的店铺"""
+    user = get_current_user()
     existing = Store.find_by_id(store_pk)
     if not existing:
         return error_response("店铺不存在", 404)
+
+    if not _is_admin(user):
+        if int(existing.get('account_id') or 0) != int(user['id']):
+            return error_response("无权删除该店铺", 403)
+        usage = _store_usage(existing)
+        if usage:
+            return error_response(
+                "该店铺还有关联业务数据，不能自行删除；如需删除请联系管理员处理",
+                403,
+                data={'usage': usage},
+            )
 
     Store.delete(store_pk)
     return success_response(msg="删除成功")

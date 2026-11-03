@@ -8,6 +8,30 @@ function _storeIsAdmin() {
   return Store?.getUser()?.role === 'admin';
 }
 
+/** 业务员自助绑定配额（来自 GET /api/stores 的 quota；管理员为 null 表示不限） */
+function _updateStoreQuotaUI() {
+  const isAdmin = _storeIsAdmin();
+  if (isAdmin || !storeQuota) return;
+  const { used, limit, remaining, canBind } = storeQuota;
+  const hint = document.getElementById('storeQuotaHint');
+  if (hint) {
+    hint.textContent = ` · 已绑定 ${used}/${limit} 家` +
+      (remaining > 0 ? `（还可自助绑定 ${remaining} 家）` : '（已达上限，如需更多请联系管理员）');
+  }
+  const btn = document.getElementById('btnAddStore');
+  if (btn) {
+    btn.disabled = !canBind;
+    btn.title = canBind ? '' : '已达自助绑定上限，请联系管理员代为绑定';
+    if (!canBind) btn.classList.add('is-disabled');
+  }
+}
+
+/** 关联数据摘要：{online_products:2, products:5} -> "online_products 2、products 5" */
+function _storeUsageText(usage) {
+  if (!usage || !Object.keys(usage).length) return '无';
+  return Object.entries(usage).map(([k, v]) => `${k} ${v}`).join('、');
+}
+
 function renderStorePage(route) {
   const isAdmin = _storeIsAdmin();
   return `
@@ -16,7 +40,7 @@ function renderStorePage(route) {
       <div class="store-page-header">
         <div>
           <h2 class="store-page-title">店铺管理</h2>
-          <p class="store-page-desc">${isAdmin ? '管理所有已绑定的店铺账号，支持授权、分组、币种配置' : '查看分配给您的店铺（只读）'}</p>
+          <p class="store-page-desc">${isAdmin ? '管理所有已绑定的店铺账号，支持授权、分组、币种配置' : '可自助绑定店铺（每个账号最多 5 家），并管理自己店铺的授权信息'}<span id="storeQuotaHint"></span></p>
         </div>
         <div class="store-header-actions">
           ${isAdmin ? `
@@ -25,10 +49,10 @@ function renderStorePage(route) {
           </button>
           <button class="btn btn-sm btn-ghost" onclick="showAddGroupDialog()">
             <i data-lucide="folder-plus" style="width:14px;height:14px;"></i> 新建分组
-          </button>
-          <button class="btn btn-primary btn-sm" onclick="showAddStoreDialog()">
-            <i data-lucide="plus" style="width:14px;height:14px;"></i> 添加店铺
           </button>` : ''}
+          <button class="btn btn-primary btn-sm" id="btnAddStore" onclick="showAddStoreDialog()">
+            <i data-lucide="plus" style="width:14px;height:14px;"></i> 添加店铺
+          </button>
         </div>
       </div>
 
@@ -95,7 +119,7 @@ function renderStorePage(route) {
         <div class="empty-state" id="storeEmptyState" style="display:none;">
           <div class="empty-icon">&#128203;</div>
           <p>暂无店铺数据</p>
-          <p style="font-size:12px;margin-top:4px;">${isAdmin ? '点击「添加店铺」开始绑定您的第一个店铺' : '请联系管理员为您分配店铺'}</p>
+          <p style="font-size:12px;margin-top:4px;">${isAdmin ? '点击「添加店铺」开始绑定您的第一个店铺' : '点击「添加店铺」自助绑定（每个账号最多 5 家）；超过上限请联系管理员'}</p>
         </div>
       </div>
 
@@ -121,6 +145,8 @@ function renderStorePage(route) {
 let allStores = [];
 let filteredStores = [];
 let storeGroups = [];
+/** 业务员自助绑定配额：{used, limit, remaining, canBind}；管理员为 null */
+let storeQuota = null;
 
 /** 从后端 API 加载店铺数据 */
 async function loadStoresFromAPI() {
@@ -128,9 +154,11 @@ async function loadStoresFromAPI() {
   if (res.code === 200 && res.data) {
     allStores = res.data.list || [];
     filteredStores = [...allStores];
+    storeQuota = res.data.quota || null;
   } else {
     allStores = [];
     filteredStores = [];
+    storeQuota = null;
   }
   return allStores;
 }
@@ -159,6 +187,7 @@ function renderStoreTable() {
   const emptyEl = document.getElementById('storeEmptyState');
   if (!tbody) return;
   const isAdmin = _storeIsAdmin();
+  _updateStoreQuotaUI();
 
   if (filteredStores.length === 0) {
     tbody.innerHTML = '';
@@ -191,7 +220,13 @@ function renderStoreTable() {
           <button class="action-link" onclick="refreshAuth(${s.id})">更新授权</button>
           <button class="action-link" onclick="openStoreOwnerDialog(${s.id})">${s.accountId ? '改绑定' : '绑定'}</button>
           <button class="action-link danger" onclick="deleteStore(${s.id})">删除</button>
-        </div>` : '<span style="color:var(--text-tertiary);">-</span>'}
+        </div>` : `
+        <div class="action-btns">
+          <button class="action-link" onclick="showEditStoreDialog(${s.id})">编辑授权</button>
+          ${s.deletable === false
+            ? `<button class="action-link" disabled title="该店铺还有业务数据（${_storeUsageText(s.dataRefs)}），不能自行删除，请联系管理员" style="opacity:.45;cursor:not-allowed;">删除</button>`
+            : `<button class="action-link danger" onclick="deleteStore(${s.id})">删除</button>`}
+        </div>`}
       </td>
     </tr>
   `).join('');
@@ -369,7 +404,11 @@ function getSelectedStoreIds() {
 function deleteStore(pk) {
   const store = filteredStores.find(s => s.id === pk);
   if (!store) return;
-  Modal.confirm(`确定要删除店铺「${store.alias}」吗？此操作不可恢复。`).then(async (ok) => {
+  const isAdmin = _storeIsAdmin();
+  const tip = isAdmin
+    ? `确定要删除店铺「${store.alias}」吗？此操作不可恢复。`
+    : `确定要删除店铺「${store.alias}」吗？删除后会释放 1 个自助绑定名额，此操作不可恢复。`;
+  Modal.confirm(tip).then(async (ok) => {
     if (ok) {
       const res = await Api.deleteStore(pk);
       if (res.code === 200) {
@@ -378,7 +417,9 @@ function deleteStore(pk) {
         renderStoreTable();
         Toast.show(`店铺「${store.alias}」已删除`, 'success');
       } else {
+        const usage = res.data?.usage;
         Toast.show(res.msg || '删除失败', 'error');
+        if (usage) Toast.show(`关联数据：${_storeUsageText(usage)}`, 'warning');
       }
     }
   });
