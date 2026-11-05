@@ -1,14 +1,16 @@
 """充值（微信 Native 支付）接口。
 
-- GET  /api/pay/status                 支付开关与缺失配置（管理员可见）
-- POST /api/pay/orders                 建单：{points, account_id?} → code_url
-- GET  /api/pay/orders/<out_trade_no>   查单（本人/管理员）
-- POST /api/pay/orders/<out_trade_no>/close  关单
-- POST /api/pay/wx/notify              微信回调（无鉴权，靠验签）
+- GET  /api/pay/status                        支付开关 / 缺失配置 / 档位（管理员）
+- POST /api/pay/orders                        建单：{points, account_id?} → code_url
+- GET  /api/pay/orders/<out_trade_no>          查单（本人/管理员）
+- POST /api/pay/orders/<out_trade_no>/close    关单
+- POST /api/pay/orders/<out_trade_no>/refund   退款（占位，501）
+- POST /api/payment/wechat/callback           微信回调（唯一入口，无鉴权靠验签）
 
-计费口径：1 点 = 1 元；只有白名单档位可下单；业务员只能给自己充，管理员可代充。
+口径：1 点 = 1 元 = 100 分；档位来自 WECHATPAY_TIERS；业务员只能给自己充，管理员可代充。
 """
 import json
+import os
 
 from flask import Blueprint, request
 
@@ -24,6 +26,7 @@ except Exception:  # noqa: BLE001
     pass
 
 SUCCESS = {'code': 'SUCCESS', 'message': '成功'}
+MAX_BODY = 64 * 1024
 
 
 def _current_user_or_401():
@@ -45,14 +48,19 @@ def pay_status():
         return err
     if not _is_admin(user):
         return error_response('仅管理员可见', 403)
+    cfg = wxpay_service.config()
+    missing = wxpay_service.missing_config()
     return success_response({
-        'enabled': wxpay_service.config()['enabled'],
-        'ready': wxpay_service.config()['enabled'] and not wxpay_service.missing_config(),
-        'missing': wxpay_service.missing_config(),
-        'tiers': list(pay_service.TIERS_POINTS),
+        'enabled': cfg['enabled'],
+        'ready': cfg['enabled'] and not missing,
+        'missing': missing,
+        'tiers': pay_service.tiers(),
         'daily_cap_points': pay_service.daily_cap_points(),
         'orders_per_minute': pay_service.ORDERS_PER_MINUTE,
         'order_ttl_minutes': pay_service.ORDER_TTL_MINUTES,
+        'callback_ip_mode': cfg['callback_ip_mode'],
+        'callback_ips_configured': len(cfg['callback_ips']),
+        'notify_url': cfg['notify_url'],
     })
 
 
@@ -65,7 +73,7 @@ def create_order():
 
     cfg = wxpay_service.config()
     if not cfg['enabled']:
-        return error_response('支付未启用（WXPAY_ENABLED=0）', 503)
+        return error_response('支付未启用（WECHATPAY_ENABLED=0）', 503)
     missing = wxpay_service.missing_config()
     if missing:
         return error_response('支付配置不完整：缺少 %s' % '、'.join(missing), 503)
@@ -81,7 +89,7 @@ def create_order():
     except (TypeError, ValueError):
         return error_response('account_id 不合法', 400)
     if not _is_admin(user):
-        account_id = int(user['id'])          # 业务员强制自己，忽略传入
+        account_id = int(user['id'])
     elif account_id is None:
         account_id = int(user['id'])
 
@@ -103,10 +111,11 @@ def create_order():
         return error_response('微信下单失败：%s' % str(exc)[:160], 502)
 
     code_url = resp.get('code_url') or ''
+    prepay_id = resp.get('prepay_id') or None
     if not code_url:
         pay_service.close_order(out_trade_no)
         return error_response('微信未返回二维码', 502)
-    pay_service.set_code_url(out_trade_no, code_url)
+    pay_service.set_code_url(out_trade_no, code_url, prepay_id)
     pay_service.log_event(out_trade_no, 'create', 'points=%s account=%s' % (points, account_id))
     return success_response({
         'out_trade_no': out_trade_no,
@@ -158,16 +167,45 @@ def close_order(out_trade_no):
     pay_service.close_order(out_trade_no)
     try:
         wxpay_service.close_order(out_trade_no)
-    except Exception:  # noqa: BLE001 - 本地已关，远端失败不影响
+    except Exception:  # noqa: BLE001
         pass
     pay_service.log_event(out_trade_no, 'close')
     return success_response({'out_trade_no': out_trade_no, 'status': 'closed'}, msg='订单已关闭')
 
 
-@pay_bp.route('/pay/wx/notify', methods=['POST'])
-def wxpay_notify():
-    """微信支付回调。验签失败 → 401（让微信重试）；业务异常 → 200（避免无限重试）。"""
+@pay_bp.route('/pay/orders/<out_trade_no>/refund', methods=['POST'])
+@handle_errors
+def refund_order(out_trade_no):
+    """退款占位：接口位保留，M3 再做（需要商户平台退款权限 + 回调）。"""
+    user, err = _current_user_or_401()
+    if err:
+        return err
+    if not _is_admin(user):
+        return error_response('仅管理员可发起退款', 403)
+    order = pay_service.get_order(out_trade_no)
+    if not order:
+        return error_response('订单不存在', 404)
+    pay_service.log_event(out_trade_no, 'refund_requested')
+    return error_response('退款功能尚未实现（M3）', 501,
+                          data={'out_trade_no': out_trade_no, 'status': order['status']})
+
+
+@pay_bp.route('/payment/wechat/callback', methods=['POST'])
+def wxpay_callback():
+    """微信支付回调（唯一入口）。验签失败 → 401；业务异常 → 200（避免无限重试）。"""
     raw = request.get_data() or b''
+    if len(raw) > MAX_BODY:
+        pay_service.log_event('-', 'notify_too_large', 'bytes=%d' % len(raw))
+        return json.dumps({'code': 'FAIL', 'message': 'payload_too_large'}), 413, {'Content-Type': 'application/json'}
+
+    cfg = wxpay_service.config()
+    client_ip = (request.headers.get('X-Real-IP') or request.remote_addr or '').strip()
+    if cfg['callback_ips'] and client_ip not in cfg['callback_ips']:
+        if cfg['callback_ip_mode'] == 'strict':
+            pay_service.log_event('-', 'notify_bad_ip', client_ip)
+            return json.dumps({'code': 'FAIL', 'message': 'ip_not_allowed'}), 403, {'Content-Type': 'application/json'}
+        pay_service.log_event('-', 'notify_unexpected_ip', client_ip)  # 先只记日志
+
     ok, reason = wxpay_service.verify_notify(request.headers, raw)
     if not ok:
         pay_service.log_event('-', 'notify_bad_sig', reason)
@@ -180,10 +218,16 @@ def wxpay_notify():
         pay_service.log_event('-', 'notify_decrypt_fail', str(exc)[:200])
         return json.dumps({'code': 'FAIL', 'message': 'decrypt_failed'}), 400, {'Content-Type': 'application/json'}
 
+    notify_id = str(payload.get('id') or '')
+    digest = pay_service.digest_of(raw)
     out_trade_no = data.get('out_trade_no') or ''
     order = pay_service.get_order(out_trade_no)
     if not order:
         pay_service.log_event(out_trade_no or '-', 'notify_unknown_order')
+        return json.dumps(SUCCESS), 200, {'Content-Type': 'application/json'}
+
+    if pay_service.digest_seen(out_trade_no, digest):
+        pay_service.log_event(out_trade_no, 'notify_duplicate', notify_id)
         return json.dumps(SUCCESS), 200, {'Content-Type': 'application/json'}
 
     if (data.get('trade_state') or '').upper() != 'SUCCESS':
@@ -197,8 +241,12 @@ def wxpay_notify():
         return json.dumps(SUCCESS), 200, {'Content-Type': 'application/json'}
 
     if order['status'] == 'created':
-        pay_service.mark_paid(out_trade_no, data.get('transaction_id') or '', raw.decode('utf-8', 'replace')[:2000])
+        try:
+            pay_service.mark_paid(out_trade_no, data.get('transaction_id') or '',
+                                  notify_id=notify_id, notify_digest=digest,
+                                  notify_raw=raw.decode('utf-8', 'replace')[:2000])
+        except Exception as exc:  # noqa: BLE001 - 唯一索引冲突 = 重复回调
+            pay_service.log_event(out_trade_no, 'notify_mark_paid_dup', str(exc)[:200])
     result = pay_service.credit_order(out_trade_no)
-    pay_service.log_event(out_trade_no, 'notify_ok',
-                          'credit=%s' % result.get('reason'))
+    pay_service.log_event(out_trade_no, 'notify_ok', 'credit=%s' % result.get('reason'))
     return json.dumps(SUCCESS), 200, {'Content-Type': 'application/json'}

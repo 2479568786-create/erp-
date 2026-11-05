@@ -1,7 +1,12 @@
-"""微信支付 APIv3 最小实现（Native 下单 / 查单 / 回调验签与解密）。
+"""微信支付 APIv3 实现（Native 下单 / 查单 / 关单 / 回调验签与解密）。
 
-只依赖标准库 + cryptography；配置全部来自环境变量（见 /etc/geekozon-erp.env 的 WXPAY_*）。
-**不落地任何密钥**：私钥与微信支付公钥都从 WXPAY_CERT_DIR 里按文件名读取。
+配置全部来自环境变量（前缀 WECHATPAY_*，见 /etc/geekozon-erp.env）：
+  WECHATPAY_ENABLED / WECHATPAY_MCHID / WECHATPAY_APPID / WECHATPAY_API_V3_KEY
+  WECHATPAY_CERT_SERIAL / WECHATPAY_CERT_DIR / WECHATPAY_PRIVATE_KEY_PATH
+  WECHATPAY_PUBKEY_ID / WECHATPAY_PUBKEY_PATH / WECHATPAY_NOTIFY_URL
+  WECHATPAY_CALLBACK_IPS / WECHATPAY_CALLBACK_IP_MODE(log|strict)
+
+纪律：私钥、APIv3 密钥只从文件/环境读取，绝不写日志、绝不入库、绝不进仓库。
 """
 import base64
 import json
@@ -11,16 +16,20 @@ import urllib.error
 import urllib.request
 import uuid
 
+from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 API_BASE = 'https://api.mch.weixin.qq.com'
-USER_AGENT = 'geekozon-erp/1.0 (wxpay-apiv3)'
-MAX_CLOCK_SKEW = 300  # 秒
+USER_AGENT = 'geekfast-erp/1.0 (wxpay-apiv3)'
+MAX_CLOCK_SKEW = 300          # 秒
+MAX_CALLBACK_BYTES = 64 * 1024  # 回调报文上限 64KB
 
 _private_key_cache = {}
 _public_key_cache = {}
+
+DEFAULT_CERT_DIR = '/etc/geekozon-erp/wechatpay'
 
 
 def _env(name, default=''):
@@ -28,39 +37,47 @@ def _env(name, default=''):
 
 
 def config():
+    cert_dir = _env('WECHATPAY_CERT_DIR', DEFAULT_CERT_DIR)
     return {
-        'enabled': _env('WXPAY_ENABLED', '0') == '1',
-        'mchid': _env('WXPAY_MCHID'),
-        'appid': _env('WXPAY_APPID'),
-        'serial': _env('WXPAY_SERIAL_NO'),
-        'apiv3_key': _env('WXPAY_APIV3_KEY'),
-        'cert_dir': _env('WXPAY_CERT_DIR', '/etc/geekozon-erp-pay'),
-        'notify_url': _env('WXPAY_NOTIFY_URL'),
-        'pub_key_id': _env('WXPAY_PUB_KEY_ID'),
-        'pub_key_file': _env('WXPAY_PUB_KEY_FILE'),
+        'enabled': _env('WECHATPAY_ENABLED', '0') == '1',
+        'mchid': _env('WECHATPAY_MCHID'),
+        'appid': _env('WECHATPAY_APPID'),
+        'apiv3_key': _env('WECHATPAY_API_V3_KEY'),
+        'serial': _env('WECHATPAY_CERT_SERIAL'),
+        'cert_dir': cert_dir,
+        'private_key_path': _env('WECHATPAY_PRIVATE_KEY_PATH') or os.path.join(cert_dir, 'apiclient_key.pem'),
+        'cert_path': os.path.join(cert_dir, 'apiclient_cert.pem'),
+        'notify_url': _env('WECHATPAY_NOTIFY_URL'),
+        'pub_key_id': _env('WECHATPAY_PUBKEY_ID'),
+        'pub_key_path': _env('WECHATPAY_PUBKEY_PATH') or os.path.join(cert_dir, 'pub_key.pem'),
+        'callback_ips': [ip.strip() for ip in _env('WECHATPAY_CALLBACK_IPS').split(',') if ip.strip()],
+        'callback_ip_mode': (_env('WECHATPAY_CALLBACK_IP_MODE', 'log') or 'log').lower(),
     }
 
 
 def missing_config():
-    """返回缺失的配置项名字列表（用于 /api/pay/status 与日志，不泄漏值）。"""
+    """缺失项（名字，不含值）。文件类缺项用 NAME:file 形式标出。"""
     cfg = config()
-    need = {
-        'WXPAY_MCHID': cfg['mchid'],
-        'WXPAY_APPID': cfg['appid'],
-        'WXPAY_SERIAL_NO': cfg['serial'],
-        'WXPAY_APIV3_KEY': cfg['apiv3_key'],
-        'WXPAY_NOTIFY_URL': cfg['notify_url'],
-        'WXPAY_PUB_KEY_ID': cfg['pub_key_id'],
-    }
-    return [k for k, v in need.items() if not v]
-
-
-def _cert_path(cfg, name):
-    return os.path.join(cfg['cert_dir'], name)
+    missing = []
+    for name, value in (
+        ('WECHATPAY_MCHID', cfg['mchid']),
+        ('WECHATPAY_APPID', cfg['appid']),
+        ('WECHATPAY_API_V3_KEY', cfg['apiv3_key']),
+        ('WECHATPAY_CERT_SERIAL', cfg['serial']),
+        ('WECHATPAY_NOTIFY_URL', cfg['notify_url']),
+        ('WECHATPAY_PUBKEY_ID', cfg['pub_key_id']),
+    ):
+        if not value:
+            missing.append(name)
+    if not os.path.exists(cfg['private_key_path']):
+        missing.append('WECHATPAY_PRIVATE_KEY_FILE')
+    if not (os.path.exists(cfg['pub_key_path']) or os.path.exists(os.path.join(cfg['cert_dir'], 'wechatpay_platform.pem'))):
+        missing.append('WECHATPAY_PUBKEY_FILE')
+    return missing
 
 
 def _load_private_key(cfg):
-    path = _cert_path(cfg, 'apiclient_key.pem')
+    path = cfg['private_key_path']
     key = _private_key_cache.get(path)
     if key is None:
         with open(path, 'rb') as f:
@@ -70,8 +87,7 @@ def _load_private_key(cfg):
 
 
 def _load_public_key(cfg):
-    """微信支付公钥（推荐，PUB_KEY_ID 模式）；没有则回退平台证书。"""
-    path = cfg['pub_key_file'] or _cert_path(cfg, 'wechatpay_pub_key.pem')
+    path = cfg['pub_key_path']
     if os.path.exists(path):
         key = _public_key_cache.get(path)
         if key is None:
@@ -79,16 +95,15 @@ def _load_public_key(cfg):
                 key = serialization.load_pem_public_key(f.read())
             _public_key_cache[path] = key
         return key
-    platform = _cert_path(cfg, 'wechatpay_platform.pem')
+    platform = os.path.join(cfg['cert_dir'], 'wechatpay_platform.pem')
     if os.path.exists(platform):
-        from cryptography import x509
         cert = x509.load_pem_x509_certificate(open(platform, 'rb').read())
         return cert.public_key()
     raise RuntimeError('缺少微信支付公钥/平台证书')
 
 
 def build_authorization(method, url_path, body='', cfg=None, private_key=None):
-    """构造 Authorization 头（WECHATPAY2-SHA256-RSA2048）。url_path 需带 query。"""
+    """Authorization: WECHATPAY2-SHA256-RSA2048 ...（url_path 需带 query）。"""
     cfg = cfg or config()
     key = private_key or _load_private_key(cfg)
     ts = str(int(time.time()))
@@ -122,6 +137,9 @@ def _http(method, url_path, body_dict=None, cfg=None):
 
 def create_native_order(out_trade_no, description, amount_cents, cfg=None):
     cfg = cfg or config()
+    if not cfg['appid']:
+        # 官方文档：Native 下单 appid 必填，且必须与 mchid 绑定
+        raise RuntimeError('缺少 WECHATPAY_APPID：Native 下单 appid 必填（需与商户号绑定）')
     body = {
         'appid': cfg['appid'],
         'mchid': cfg['mchid'],
@@ -146,7 +164,7 @@ def close_order(out_trade_no, cfg=None):
 
 
 def verify_notify(headers, body_bytes, cfg=None, now=None):
-    """验签回调。headers 用大小写不敏感取值。返回 (ok, reason)。"""
+    """验签回调。返回 (ok, reason)。"""
     cfg = cfg or config()
     get = (lambda name: headers.get(name) or headers.get(name.lower()) or headers.get(name.title()) or '')
     ts = get('Wechatpay-Timestamp')
@@ -184,7 +202,7 @@ def decrypt_resource(resource, cfg=None):
     cfg = cfg or config()
     key = cfg['apiv3_key'].encode('utf-8')
     if len(key) != 32:
-        raise RuntimeError('WXPAY_APIV3_KEY 必须是 32 位')
+        raise RuntimeError('WECHATPAY_API_V3_KEY 必须是 32 位')
     aead = AESGCM(key)
     raw = aead.decrypt(
         str(resource.get('nonce', '')).encode('utf-8'),

@@ -1,18 +1,20 @@
-"""充值订单业务层（状态机 + 幂等入账）。
+"""充值订单业务层（状态机 + 幂等入账 + 回调去重）。
 
-设计要点
-- 状态机单向：created → paid → credited（关闭：created → closed）
-- 入账幂等：`UPDATE ... WHERE status='paid'` 抢一次，rowcount=0 就不再点数
-- 入账复用 image_billing_service.adjust_balance，流水落 image_ops_log（operator='wxpay:<订单号>'）
-- 所有函数支持传入 conn（单测用临时库），不传才用 app 的 db 助手（懒加载，避免测试时连到生产库）
+- 状态机单向：created → paid → credited（created → closed）
+- 入账幂等：`UPDATE ... WHERE status='paid'` 抢一次；另加回调去重键
+- 回调去重：`notify_digest` = sha256(回调原文) 唯一索引 + `notify_id` 记录微信回调 id
+- 入账复用 image_billing_service.adjust_balance（operator='wxpay:<订单号>'，流水落 image_ops_log）
+- 档位来自环境变量 WECHATPAY_TIERS（默认 10,30,50,100,200），不写死在代码里
+- 所有函数支持传入 conn（单测用临时库），不传才用 app 的 db（懒加载，避免测试连生产库）
 """
+import hashlib
 import os
 import random
 import string
 import time
 from datetime import datetime, timedelta, timezone
 
-TIERS_POINTS = (10, 30, 50, 100, 200, 500)
+DEFAULT_TIERS = (10, 30, 50, 100, 200)
 ORDER_TTL_MINUTES = 15
 ORDERS_PER_MINUTE = 3
 
@@ -27,7 +29,10 @@ SCHEMA = (
         points REAL NOT NULL,
         status TEXT NOT NULL DEFAULT 'created',
         code_url TEXT,
+        prepay_id TEXT,
         transaction_id TEXT,
+        notify_id TEXT,
+        notify_digest TEXT,
         paid_at TEXT,
         credited_at TEXT,
         notify_raw TEXT,
@@ -43,23 +48,45 @@ SCHEMA = (
     )""",
     "CREATE INDEX IF NOT EXISTS idx_pay_events_no ON pay_events(out_trade_no)",
     "CREATE INDEX IF NOT EXISTS idx_pay_orders_status ON pay_orders(status, created_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_pay_orders_transaction ON pay_orders(transaction_id) "
+    "WHERE transaction_id IS NOT NULL AND transaction_id != ''",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_pay_orders_notify_digest ON pay_orders(notify_digest) "
+    "WHERE notify_digest IS NOT NULL AND notify_digest != ''",
+)
+
+ADD_COLUMNS = (
+    ('prepay_id', "ALTER TABLE pay_orders ADD COLUMN prepay_id TEXT"),
+    ('notify_id', "ALTER TABLE pay_orders ADD COLUMN notify_id TEXT"),
+    ('notify_digest', "ALTER TABLE pay_orders ADD COLUMN notify_digest TEXT"),
 )
 
 _table_ready = False
 
 
 def ensure_tables(conn=None):
-    """幂等建表；conn 为空时走 app 的 db.execute（只在首次调用时做一次）。"""
+    """幂等建表 + 补列 + 建索引。"""
     global _table_ready
     if conn is not None:
-        for sql in SCHEMA:
+        for sql in SCHEMA[:2]:
+            conn.execute(sql)
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(pay_orders)")}
+        for name, ddl in ADD_COLUMNS:
+            if name not in cols:
+                conn.execute(ddl)
+        for sql in SCHEMA[2:]:
             conn.execute(sql)
         conn.commit()
         return
     if _table_ready:
         return
-    from db import execute
-    for sql in SCHEMA:
+    from db import execute, query
+    for sql in SCHEMA[:2]:
+        execute(sql)
+    cols = {row['name'] for row in query("PRAGMA table_info(pay_orders)")}
+    for name, ddl in ADD_COLUMNS:
+        if name not in cols:
+            execute(ddl)
+    for sql in SCHEMA[2:]:
         execute(sql)
     _table_ready = True
 
@@ -74,25 +101,41 @@ def _db_execute(sql, params=()):
     return execute(sql, params)
 
 
+def tiers():
+    raw = (os.environ.get('WECHATPAY_TIERS') or '').strip()
+    if not raw:
+        return list(DEFAULT_TIERS)
+    out = []
+    for part in raw.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            value = int(part)
+        except ValueError:
+            continue
+        if value > 0:
+            out.append(value)
+    return sorted(set(out)) or list(DEFAULT_TIERS)
+
+
+def daily_cap_points():
+    try:
+        return int(os.environ.get('WECHATPAY_DAILY_CAP_POINTS', '2000'))
+    except (TypeError, ValueError):
+        return 2000
+
+
 def _utc_str(dt):
-    """本地 datetime -> SQLite datetime('now') 同口径的 UTC 字符串。"""
     return dt.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
 
 def _local_today_start(day=None):
-    """本地某天 00:00；day 形如 2026-11-05，缺省为本地今天。"""
     if day:
         base = datetime.strptime(day, '%Y-%m-%d')
         return base.replace(hour=0, minute=0, second=0, microsecond=0).astimezone()
     now = datetime.now().astimezone()
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
-
-
-def daily_cap_points():
-    try:
-        return int(os.environ.get('WXPAY_DAILY_CAP_POINTS', '2000'))
-    except (TypeError, ValueError):
-        return 2000
 
 
 def _row_to_dict(row):
@@ -115,9 +158,13 @@ def _fetch(conn, sql, params=(), one=True):
 
 def _write(conn, sql, params=()):
     if conn is not None:
-        cur = conn.execute(sql, params)
-        conn.commit()
-        return cur.rowcount
+        try:
+            cur = conn.execute(sql, params)
+            conn.commit()
+            return cur.rowcount
+        except Exception:
+            conn.rollback()
+            raise
     return _db_execute(sql, params)
 
 
@@ -127,14 +174,20 @@ def new_out_trade_no(now=None):
     return 'RC%s%s' % (now.strftime('%Y%m%d%H%M%S'), suffix)
 
 
+def digest_of(raw):
+    if isinstance(raw, str):
+        raw = raw.encode('utf-8')
+    return hashlib.sha256(raw or b'').hexdigest()
+
+
 def validate_points(points):
-    """只接受白名单档位；返回 (ok, points_int_or_none, reason)。"""
     try:
         value = int(points)
     except (TypeError, ValueError):
         return False, None, '点数必须是整数'
-    if value not in TIERS_POINTS:
-        return False, None, '只支持这些充值档位：%s 点' % '/'.join(str(t) for t in TIERS_POINTS)
+    allowed = tiers()
+    if value not in allowed:
+        return False, None, '只支持这些充值档位：%s 点' % '/'.join(str(t) for t in allowed)
     return True, value, ''
 
 
@@ -150,7 +203,6 @@ def orders_last_minute(account_id, conn=None, now_ts=None):
 
 
 def daily_points(account_id, conn=None, day=None):
-    """当天该账号「已支付/已入账」的点数合计（不含 created/closed）。"""
     start = _local_today_start(day)
     end = start + timedelta(days=1)
     sql = ("SELECT COALESCE(SUM(points), 0) AS p FROM pay_orders "
@@ -176,18 +228,26 @@ def get_order(out_trade_no, conn=None):
     return _fetch(conn, "SELECT * FROM pay_orders WHERE out_trade_no = ?", (out_trade_no,))
 
 
-def set_code_url(out_trade_no, code_url, conn=None):
+def set_code_url(out_trade_no, code_url, prepay_id=None, conn=None):
     return _write(conn,
-                  "UPDATE pay_orders SET code_url = ?, updated_at = datetime('now') WHERE out_trade_no = ?",
-                  (code_url, out_trade_no))
+                  "UPDATE pay_orders SET code_url = ?, prepay_id = ?, updated_at = datetime('now') "
+                  "WHERE out_trade_no = ?",
+                  (code_url, prepay_id, out_trade_no))
 
 
-def mark_paid(out_trade_no, transaction_id, notify_raw=None, conn=None):
+def mark_paid(out_trade_no, transaction_id, notify_id=None, notify_digest=None,
+              notify_raw=None, conn=None):
     return _write(conn,
-                  "UPDATE pay_orders SET status = 'paid', transaction_id = ?, notify_raw = ?, "
-                  "paid_at = datetime('now'), updated_at = datetime('now') "
+                  "UPDATE pay_orders SET status = 'paid', transaction_id = ?, notify_id = ?, "
+                  "notify_digest = ?, notify_raw = ?, paid_at = datetime('now'), updated_at = datetime('now') "
                   "WHERE out_trade_no = ? AND status = 'created'",
-                  (transaction_id, notify_raw, out_trade_no))
+                  (transaction_id, notify_id, notify_digest, notify_raw, out_trade_no))
+
+
+def digest_seen(out_trade_no, notify_digest, conn=None):
+    """同一条回调（原文相同）是否已处理过。"""
+    row = _fetch(conn, "SELECT out_trade_no FROM pay_orders WHERE notify_digest = ?", (notify_digest,))
+    return bool(row) and row['out_trade_no'] == out_trade_no
 
 
 def close_order(out_trade_no, conn=None):
@@ -198,7 +258,6 @@ def close_order(out_trade_no, conn=None):
 
 
 def claim_credit(out_trade_no, conn=None):
-    """把 paid 原子地改成 credited；抢到返回 True。"""
     changed = _write(conn,
                      "UPDATE pay_orders SET status = 'credited', credited_at = datetime('now'), "
                      "updated_at = datetime('now') WHERE out_trade_no = ? AND status = 'paid'",
@@ -213,7 +272,6 @@ def log_event(out_trade_no, event, detail='', conn=None):
 
 
 def credit_order(out_trade_no, conn=None, adjust=None):
-    """幂等入账：只有成功把 paid→credited 的那一次才加点数。"""
     order = get_order(out_trade_no, conn=conn)
     if not order:
         return {'ok': False, 'reason': 'order_not_found'}
@@ -242,9 +300,21 @@ def credit_order(out_trade_no, conn=None, adjust=None):
 
 
 def expire_created(conn=None, ttl_minutes=ORDER_TTL_MINUTES):
-    """把超时未支付的单关掉（不动已支付未入账的）。"""
     cutoff = _utc_str((datetime.now() - timedelta(minutes=ttl_minutes)).astimezone())
     return _write(conn,
                   "UPDATE pay_orders SET status = 'closed', updated_at = datetime('now') "
                   "WHERE status = 'created' AND created_at < ?",
                   (cutoff,))
+
+
+def pending_credit(conn=None, limit=50):
+    """已支付但未入账（含入账失败的），给对账脚本补。"""
+    return _fetch(conn,
+                  "SELECT out_trade_no, account_id, points, amount_cents, status FROM pay_orders "
+                  "WHERE status = 'paid' ORDER BY paid_at ASC LIMIT ?",
+                  (limit,), one=False) or []
+
+
+def stats(conn=None):
+    rows = _fetch(conn, "SELECT status, COUNT(*) AS c FROM pay_orders GROUP BY status", (), one=False) or []
+    return {row['status']: row['c'] for row in rows}

@@ -23,7 +23,7 @@ _PUBLIC_API_PATHS = {
     '/api/user/info',
     '/api/health',
     '/api/config',
-    '/api/pay/wx/notify',
+    '/api/payment/wechat/callback',
 }
 
 
