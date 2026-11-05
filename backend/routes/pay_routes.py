@@ -43,25 +43,32 @@ def _is_admin(user):
 @pay_bp.route('/pay/status', methods=['GET'])
 @handle_errors
 def pay_status():
+    """支付开关 / 档位。管理员看到完整配置，业务员只看到「能否充值」。"""
     user, err = _current_user_or_401()
     if err:
         return err
-    if not _is_admin(user):
-        return error_response('仅管理员可见', 403)
     cfg = wxpay_service.config()
     missing = wxpay_service.missing_config()
-    return success_response({
+    payload = {
         'enabled': cfg['enabled'],
-        'ready': cfg['enabled'] and not missing,
-        'missing': missing,
+        'ready': bool(cfg['enabled']) and not missing,
         'tiers': pay_service.tiers(),
+        'order_ttl_minutes': pay_service.ORDER_TTL_MINUTES,
+        'channel': 'wechat_native',
+    }
+    if not _is_admin(user):
+        # 业务员：不暴露回调地址/缺失项细节，只告诉「能不能充」和「缺几项」
+        payload['missing_count'] = len(missing)
+        return success_response(payload)
+    payload.update({
+        'missing': missing,
         'daily_cap_points': pay_service.daily_cap_points(),
         'orders_per_minute': pay_service.ORDERS_PER_MINUTE,
-        'order_ttl_minutes': pay_service.ORDER_TTL_MINUTES,
         'callback_ip_mode': cfg['callback_ip_mode'],
         'callback_ips_configured': len(cfg['callback_ips']),
         'notify_url': cfg['notify_url'],
     })
+    return success_response(payload)
 
 
 @pay_bp.route('/pay/orders', methods=['POST'])
@@ -125,6 +132,26 @@ def create_order():
         'account_id': account_id,
         'expires_in': pay_service.ORDER_TTL_MINUTES * 60,
     }, msg='订单已创建，请扫码支付')
+
+
+@pay_bp.route('/pay/orders', methods=['GET'])
+@handle_errors
+def list_orders_route():
+    """充值记录列表。业务员只看自己（account_id/operator_id 命中），管理员可 ?account_id= 过滤。"""
+    user, err = _current_user_or_401()
+    if err:
+        return err
+    try:
+        limit = int(request.args.get('limit') or 20)
+    except (TypeError, ValueError):
+        limit = 20
+    raw_account = (request.args.get('account_id') or request.args.get('account') or '').strip()
+    account_id = int(raw_account) if raw_account.isdigit() else None
+    if _is_admin(user):
+        rows = pay_service.list_orders(account_id=account_id, limit=limit)
+    else:
+        rows = pay_service.list_orders(owner_id=int(user['id']), limit=limit)
+    return success_response({'list': rows, 'total': len(rows)})
 
 
 @pay_bp.route('/pay/orders/<out_trade_no>', methods=['GET'])

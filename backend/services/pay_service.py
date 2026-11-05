@@ -224,6 +224,34 @@ def create_order(out_trade_no, account_id, operator_id, points, amount_cents, co
     return get_order(out_trade_no, conn=conn)
 
 
+
+def list_orders(account_id=None, operator_id=None, owner_id=None, limit=20, conn=None):
+    """最近订单（充值记录）。owner_id = 本人相关（account_id 或 operator_id）。"""
+    try:
+        limit = max(1, min(int(limit or 20), 100))
+    except (TypeError, ValueError):
+        limit = 20
+    where = []
+    params = []
+    if owner_id is not None:
+        where.append('(account_id = ? OR operator_id = ?)')
+        params.extend([int(owner_id), int(owner_id)])
+    else:
+        if account_id is not None:
+            where.append('account_id = ?')
+            params.append(int(account_id))
+        if operator_id is not None:
+            where.append('operator_id = ?')
+            params.append(int(operator_id))
+    sql = ("SELECT out_trade_no, channel, account_id, operator_id, amount_cents, points, "
+           "status, paid_at, credited_at, created_at FROM pay_orders")
+    if where:
+        sql += ' WHERE ' + ' AND '.join(where)
+    sql += ' ORDER BY id DESC LIMIT ?'
+    params.append(limit)
+    rows = _fetch(conn, sql, tuple(params), one=False) or []
+    return [dict(r) if hasattr(r, 'keys') else r for r in rows]
+
 def get_order(out_trade_no, conn=None):
     return _fetch(conn, "SELECT * FROM pay_orders WHERE out_trade_no = ?", (out_trade_no,))
 
