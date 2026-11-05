@@ -388,6 +388,24 @@ class ImageBillingTests(unittest.TestCase):
         self.assertEqual(5.0, payload['list'][0]['points'])
         self.assertEqual(5.0, payload['total_points'])
 
+    def test_topup_logs_include_reversal_and_net_totals(self):
+        """冲销行必须出现（is_reversal），且 total_points 是净额、正负分开统计。"""
+        billing.topup(self.user_id, 3, reason='自测充值', operator='tester')
+        billing.adjust_balance(self.user_id, points=-3, mode='add',
+                               reason='冲销：自测充值', operator='tester')
+        response = self.client.get('/api/image-billing/topups',
+                                   headers={'Authorization': 'Bearer ' + self.admin_token})
+        data = response.get_json()['data']
+        rows = data['list']
+        self.assertEqual(2, len(rows))
+        self.assertTrue(rows[0]['is_reversal'])
+        self.assertEqual(-3.0, rows[0]['points'])
+        self.assertFalse(rows[1]['is_reversal'])
+        self.assertEqual(3.0, rows[1]['points'])
+        self.assertEqual(3.0, data['total_positive_points'])
+        self.assertEqual(-3.0, data['reversal_points'])
+        self.assertEqual(0.0, data['total_points'])
+
     # ---------------------------------------------------------------- 生图入口（应用层计费守卫）
     def _gallery_app(self):
         from routes.gallery_routes import gallery_bp

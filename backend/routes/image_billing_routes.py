@@ -168,7 +168,9 @@ def ext_topups():
     account_id = _int_arg('account_id')
     limit = _int_arg('limit', 100) or 100
     rows = billing.topup_logs(account_id=account_id, limit=limit)
-    return success_response({'list': rows, 'total_points': round(sum(r['points'] for r in rows), 2)})
+    data = {'list': rows}
+    data.update(billing.topup_totals(rows))
+    return success_response(data)
 
 
 # ---------------------------------------------------------------- 管理端（登录态）
@@ -181,7 +183,9 @@ def admin_topups():
     account_id = _int_arg('account_id')
     limit = _int_arg('limit', 100) or 100
     rows = billing.topup_logs(account_id=account_id, limit=limit)
-    return success_response({'list': rows, 'total_points': round(sum(r['points'] for r in rows), 2)})
+    data = {'list': rows}
+    data.update(billing.topup_totals(rows))
+    return success_response(data)
 
 
 @image_billing_bp.route('/image-billing/accounts/<int:account_id>/topup', methods=['POST'])

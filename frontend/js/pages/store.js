@@ -128,9 +128,11 @@ function renderStorePage(route) {
         <div class="store-footer-left">
           <span class="select-info">已选 <strong id="storeSelectedCount">0</strong> 条</span>
           ${isAdmin ? `
-          <button class="btn btn-sm btn-ghost" onclick="batchSetGroup()">批量设分组</button>
-          <button class="btn btn-sm btn-ghost" onclick="batchSetCurrency()">批量设币种</button>
-          <button class="btn btn-sm btn-ghost danger" onclick="batchDeleteStores()">批量删除</button>` : ''}
+          <span id="storeBatchActions" class="batch-actions-hidden">
+            <button class="btn btn-sm btn-ghost" onclick="batchSetGroup()">批量设分组</button>
+            <button class="btn btn-sm btn-ghost" onclick="batchSetCurrency()">批量设币种</button>
+            <button class="btn btn-sm btn-ghost danger" onclick="batchDeleteStores()">批量删除</button>
+          </span>` : ''}
         </div>
         <div class="store-footer-right">
           <span class="total-info">共 <strong id="storeTotalCount">0</strong> 个店铺</span>
@@ -201,7 +203,7 @@ function renderStoreTable() {
 
   tbody.innerHTML = filteredStores.map((s, i) => `
     <tr data-id="${s.id}" data-pk="${s.id}">
-      ${isAdmin ? `<td><input type="checkbox" class="table-check-item store-check" value="${s.id}"></td>` : ''}
+      ${isAdmin ? `<td><input type="checkbox" class="table-check-item store-check" value="${s.id}" onchange="updateStoreSelection()"></td>` : ''}
       <td class="seq-cell">${i + 1}</td>
       <td><span class="store-id-text">${s.store_id || s.storeId || s.id}</span></td>
       <td class="limit-cell">${s.todayLimit > 0 ? s.todayLimit.toLocaleString() : '-'}</td>
@@ -217,9 +219,14 @@ function renderStoreTable() {
         ${isAdmin ? `
         <div class="action-btns">
           <button class="action-link" onclick="showEditStoreDialog(${s.id})">编辑</button>
-          <button class="action-link" onclick="refreshAuth(${s.id})">更新授权</button>
-          <button class="action-link" onclick="openStoreOwnerDialog(${s.id})">${s.accountId ? '改绑定' : '绑定'}</button>
-          <button class="action-link danger" onclick="deleteStore(${s.id})">删除</button>
+          <details class="row-more">
+            <summary class="action-link more-action" title="更多操作">更多 ▾</summary>
+            <div class="more-actions-menu row-more-menu">
+              <button class="action-link" onclick="refreshAuth(${s.id})">更新授权</button>
+              <button class="action-link" onclick="openStoreOwnerDialog(${s.id})">${s.accountId ? '改绑定' : '绑定'}</button>
+              <button class="action-link danger" onclick="deleteStore(${s.id})">删除</button>
+            </div>
+          </details>
         </div>` : `
         <div class="action-btns">
           <button class="action-link" onclick="showEditStoreDialog(${s.id})">编辑授权</button>
@@ -299,6 +306,8 @@ function toggleSelectAllStores(checkbox) {
 function updateStoreSelection() {
   const checked = document.querySelectorAll('.store-check:checked');
   document.getElementById('storeSelectedCount').textContent = checked.length;
+  const batch = document.getElementById('storeBatchActions');
+  if (batch) batch.style.display = checked.length ? 'inline-flex' : 'none';
   const allCheck = document.querySelector('.table-check-all');
   const totalItems = document.querySelectorAll('.store-check');
   if (allCheck) allCheck.checked = totalItems.length > 0 && checked.length === totalItems.length;
@@ -1019,14 +1028,21 @@ async function submitUserTopup(uid) {
 /** 充值流水（对账用） */
 async function showUserTopupLog() {
   const res = await API.get('/api/image-billing/topups?limit=100');
-  const rows = (res && res.code === 200 && res.data) ? (res.data.list || []) : [];
+  const data = (res && res.code === 200 && res.data) ? res.data : {};
+  const rows = data.list || [];
+  const totalPoints = Number(data.total_points || 0);
+  const positivePoints = Number(data.total_positive_points || 0);
+  const reversalPoints = Number(data.reversal_points || 0);
   const usernames = {};
   _usersCache.forEach(u => { usernames[u.id] = u.username; });
   const body = rows.length ? rows.map(r => `
     <tr>
       <td>${r.created_at || '-'}</td>
       <td>${usernames[r.account_id] || ('#' + r.account_id)}</td>
-      <td style="color:#16a34a;font-weight:600;">+${Number(r.points || 0).toFixed(2)}</td>
+      <td>${(r.is_reversal || Number(r.points || 0) < 0)
+        ? `<span style="color:#b42318;font-weight:600;">${Number(r.points || 0).toFixed(2)}</span>
+           <span style="font-size:11px;padding:1px 6px;border-radius:8px;background:#f2f4f7;color:#667085;">冲销</span>`
+        : `<span style="color:#16a34a;font-weight:600;">+${Number(r.points || 0).toFixed(2)}</span>`}</td>
       <td>${r.balance_after == null ? '-' : Number(r.balance_after).toFixed(2)}</td>
       <td>${r.operator || '-'}</td>
       <td>${r.reason || '-'}</td>
@@ -1036,7 +1052,11 @@ async function showUserTopupLog() {
     title: '充值流水',
     size: 'lg',
     body: `
-      <p style="font-size:13px;color:var(--text-tertiary);margin-bottom:12px;">最近 100 条「加点数」记录，用于和外部台账对账（1 点 = 1 元）。</p>
+      <p style="font-size:13px;color:var(--text-tertiary);margin-bottom:12px;">最近 100 条「加点数」记录，用于和外部台账对账（1 点 = 1 元）。<br>
+        <b style="color:var(--text-primary);">净额 ${totalPoints.toFixed(2)} 点</b>
+        · 正向累计 +${positivePoints.toFixed(2)}
+        · 冲销 ${reversalPoints.toFixed(2)}（负数行为冲销/退款；接口的 total_points 已是净额）
+      </p>
       <div style="overflow:auto;max-height:420px;">
         <table class="collect-table" style="width:100%;font-size:13px;">
           <thead>

@@ -341,10 +341,17 @@ def topup(account_id, points, reason='', operator=''):
 
 
 def topup_logs(account_id=None, limit=100):
-    """充值流水（image_ops_log 里 action=balance_add 且加点为正的记录）。"""
+    """充值流水（image_ops_log 里 action=balance_add 且金额非 0 的记录）。
+
+    口径（2026-11-06 改，加法式、不破坏旧字段）：
+    - 正向行 points > 0：真实充值/加点；
+    - 负数行 points < 0：冲销 / 微信退款等，`is_reversal=True`；
+      旧实现用 `amount_cents > 0` 把负数行过滤掉、却仍把 sum 当累计充值报出去，账本自证不成立。
+    - 汇总口径见 `topup_totals()`：`total_points` 是**净额**，另给正向累计与冲销累计。
+    """
     limit = max(1, min(int(limit or 100), 500))
     sql = ('SELECT id, account_id, amount_cents, after_json, operator, reason, created_at '
-           "FROM image_ops_log WHERE action = 'balance_add' AND amount_cents > 0")
+           "FROM image_ops_log WHERE action = 'balance_add' AND amount_cents != 0")
     params = []
     if account_id is not None:
         sql += ' AND account_id = ?'
@@ -359,16 +366,35 @@ def topup_logs(account_id=None, limit=100):
             after = json.loads(row.get('after_json') or '{}')
         except (TypeError, ValueError):
             after = {}
+        cents = int(row.get('amount_cents') or 0)
         result.append({
             'id': row['id'],
             'account_id': row['account_id'],
-            'points': cents_to_points(row.get('amount_cents')),
+            'points': cents_to_points(cents),
+            'is_reversal': cents < 0,
             'balance_after': after.get('balance_points'),
             'operator': row.get('operator') or '',
             'reason': row.get('reason') or '',
             'created_at': row.get('created_at') or '',
         })
     return result
+
+
+def topup_totals(rows):
+    """充值流水汇总：`total_points` 为净额（正值+负值），另给正向累计与冲销累计。"""
+    positive = 0.0
+    reversal = 0.0
+    for row in rows or []:
+        points = float(row.get('points') or 0)
+        if points > 0:
+            positive += points
+        elif points < 0:
+            reversal += points
+    return {
+        'total_points': round(positive + reversal, 2),
+        'total_positive_points': round(positive, 2),
+        'reversal_points': round(reversal, 2),
+    }
 
 
 def set_enabled(account_id, enabled, operator='', reason=''):

@@ -301,25 +301,38 @@ const RechargePage = (() => {
       </div>`;
   }
 
-  function renderTopups(rows) {
+  function renderTopups(rows, totals) {
     const box = document.getElementById('rcTopupTable');
     if (!box) return;
+    const t = totals || {};
+    const summary = `<div class="rc-muted" style="font-size:12px;margin-bottom:8px;">
+      净额 <b style="color:#101828;">${pointsText(t.total_points || 0)}</b> 点
+      · 正向累计 <b>+${pointsText(t.total_positive_points || 0)}</b>
+      · 冲销 <b>${pointsText(t.reversal_points || 0)}</b>
+    </div>`;
     if (!rows || !rows.length) {
-      box.innerHTML = '<div class="rc-empty">暂无人工充值流水</div>';
+      box.innerHTML = summary + '<div class="rc-empty">暂无人工充值流水</div>';
       return;
     }
-    box.innerHTML = `
+    box.innerHTML = summary + `
       <div style="overflow-x:auto;">
         <table class="rc-table">
           <thead><tr><th>时间</th><th>账号</th><th>点数</th><th>余额后</th><th>操作人</th></tr></thead>
           <tbody>
-            ${rows.map((r) => `<tr>
-              <td>${fmtTime(r.created_at)}</td>
-              <td>${esc(accountLabel(state.accounts.find((a) => a.id === r.account_id) || { id: r.account_id }))}</td>
-              <td style="color:#067647;font-weight:600;">+${pointsText(r.points)}</td>
-              <td>${r.balance_after == null ? '-' : pointsText(r.balance_after)}</td>
-              <td style="font-size:12px;">${esc(r.operator || '-')}</td>
-            </tr>`).join('')}
+            ${rows.map((r) => {
+              const isReversal = r.is_reversal || Number(r.points) < 0;
+              const ptsCell = isReversal
+                ? `<span style="color:#b42318;font-weight:600;">${pointsText(r.points)}</span>
+                   <span class="rc-status closed" title="${esc(r.reason || '冲销')}">冲销</span>`
+                : `<span style="color:#067647;font-weight:600;">+${pointsText(r.points)}</span>`;
+              return `<tr>
+                <td>${fmtTime(r.created_at)}</td>
+                <td>${esc(accountLabel(state.accounts.find((a) => a.id === r.account_id) || { id: r.account_id }))}</td>
+                <td>${ptsCell}</td>
+                <td>${r.balance_after == null ? '-' : pointsText(r.balance_after)}</td>
+                <td style="font-size:12px;">${esc(r.operator || '-')}</td>
+              </tr>`;
+            }).join('')}
           </tbody>
         </table>
       </div>`;
@@ -396,7 +409,8 @@ const RechargePage = (() => {
     if (!state.isAdmin) return;
     const res = await API.get('/api/image-billing/topups', { limit: 30 });
     if (res && res.code === 200) {
-      renderTopups((res.data && res.data.list) || []);
+      const data = res.data || {};
+      renderTopups(data.list || [], { total_points: data.total_points, total_positive_points: data.total_positive_points, reversal_points: data.reversal_points });
     } else {
       const box = document.getElementById('rcTopupTable');
       if (box) box.innerHTML = '<div class="rc-empty">人工充值流水加载失败</div>';
