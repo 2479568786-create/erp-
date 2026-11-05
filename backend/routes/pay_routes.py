@@ -145,6 +145,7 @@ def list_orders_route():
         limit = int(request.args.get('limit') or 20)
     except (TypeError, ValueError):
         limit = 20
+    limit = max(1, min(limit, 100))  # 硬上限：单页最多 100 条（服务层同样 clamp，双保险）
     raw_account = (request.args.get('account_id') or request.args.get('account') or '').strip()
     account_id = int(raw_account) if raw_account.isdigit() else None
     if _is_admin(user):
