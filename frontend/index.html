@@ -1,10 +1,11 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="GeekOzon ERP - Ozon 电商全链路管理系统">
-  <title>GeekOzon ERP</title>
+  <meta name="description" content="Geekfast ERP - Ozon 电商全链路管理系统">
+  <title>Geekfast ERP</title>
+  <link rel="icon" type="image/svg+xml" href="assets/brand/geekfast-favicon.svg">
 
   <!-- Tailwind Play CDN（让 TailAdmin 真实类生效） -->
   <script>
@@ -411,7 +412,7 @@
     }
     .sidebar ~ .main-content.collapsed-layout { margin-left: 0 !important; }
 
-    @media (max-width: 1023px) {
+    @media (max-width: 1279px) {
       #sidebar {
         position: fixed !important;
         top: 0 !important;
@@ -433,7 +434,51 @@
         padding: 18px 14px 28px !important;
       }
     }
+
+    /* ===== Geekfast brand lockup (C / Fast Forward) ===== */
+    #sidebar .gf-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      text-decoration: none;
+    }
+    #sidebar .gf-mark {
+      width: 32px;
+      height: 32px;
+      flex: 0 0 32px;
+      display: block;
+    }
+    #sidebar .gf-wordmark {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-width: 0;
+      line-height: 1;
+      text-align: left;
+    }
+    #sidebar .gf-wordmark strong {
+      font-family: 'Bahnschrift', 'Segoe UI', 'Arial', sans-serif;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.4px;
+      color: #0B1220;
+      white-space: nowrap;
+    }
+    #sidebar .gf-wordmark small {
+      margin-top: 4px;
+      font-family: 'Bahnschrift', 'Segoe UI', 'Arial', sans-serif;
+      font-size: 8px;
+      font-weight: 600;
+      letter-spacing: 2.8px;
+      color: #6366F1;
+    }
+    #sidebar.collapsed .gf-wordmark { display: none !important; }
+    #sidebar.collapsed .gf-brand { width: 100%; gap: 0; justify-content: center; }
+    #sidebar.collapsed .sidebar-brand { padding-left: 0 !important; padding-right: 0 !important; }
   </style>
+  <link rel="stylesheet" href="css/brand-ui.css?v=20261104-ui6">
+  <link rel="stylesheet" href="css/brand-responsive.css?v=20261104-ui4">
   <link rel="stylesheet" href="css/recharge.css?v=20261106a">
 </head>
 <body class="bg-[#eef3f8]">
@@ -444,10 +489,9 @@
   <aside class="sidebar is-open !w-[260px] shrink-0 bg-white border-r border-gray-200 overflow-y-auto no-scrollbar" id="sidebar">
     <!-- 侧栏顶部 Logo -->
     <div class="sidebar-brand flex items-center gap-2 px-5 py-5 border-b border-gray-100">
-      <a href="#/home" class="flex items-center gap-2.5">
-        <span class="w-8 h-8 rounded-md bg-gray-900 flex items-center justify-center text-white"><i data-lucide="smile" style="width:18px;height:18px;"></i></span>
-        <img class="russia-emblem" src="https://upload.wikimedia.org/wikipedia/commons/1/1e/Silhouette_-_black_-_Coat_of_Arms_of_the_Russian_Federation.svg" alt="俄罗斯联邦国徽">
-        <span class="logo-text"><strong class="font-semibold text-gray-800 text-base">GeekOzon</strong><small>ERP</small></span>
+      <a href="#/home" class="gf-brand">
+        <img class="gf-mark" src="assets/brand/geekfast-mark.svg" alt="Geekfast">
+        <span class="gf-wordmark"><strong>Geekfast</strong><small>ERP</small></span>
       </a>
     </div>
 
@@ -799,25 +843,25 @@
 <script src="js/router.js"></script>
 <!-- 组件模块 -->
 <script src="js/components/header.js"></script>
-<script src="js/components/sidebar.js?v=20261030a"></script>
+<script src="js/components/sidebar.js?v=20261104-ui2"></script>
 <script src="js/components/card.js"></script>
 <script src="js/components/notice-list.js"></script>
 <script src="js/components/modal.js"></script>
-<script src="js/components/login-gate.js"></script>
+<script src="js/components/login-gate.js?v=20261104-geekfast"></script>
 <!-- 服务模块 -->
 <script src="js/services/product-mapping.js"></script>
 <!-- 工具模块 -->
 <script src="js/utils/auto-save.js"></script>
 <!-- 页面逻辑 -->
-<script src="js/pages/home.js"></script>
+<script src="js/pages/home.js?v=20261104-ui2"></script>
 <script src="js/pages/public-notifications.js"></script>
-<script src="js/pages/collect.js?v=20261104c"></script>
+<script src="js/pages/collect.js?v=20261104-ui4"></script>
 <script src="js/pages/ai-write.js"></script>
-<script src="js/pages/publish.js?v=20261104c"></script>
-<script src="js/pages/store.js?v=20261104d"></script>
-<script src="js/pages/online-products.js"></script>
+<script src="js/pages/publish.js?v=20261104-ui2"></script>
+<script src="js/pages/store.js?v=20261104-ui4"></script>
+<script src="js/pages/online-products.js?v=20261104-ui4"></script>
 <script src="js/pages/model.js"></script>
-<script src="js/pages/calculator.js"></script>
+<script src="js/pages/calculator.js?v=20261104-ui2"></script>
 <script src="js/pages/media.js?v=20261104d"></script>
 <script src="js/pages/watermark.js"></script>
 <script src="js/pages/orders.js"></script>
@@ -825,9 +869,9 @@
 <script src="js/pages/insights.js"></script>
 <script src="js/pages/seller-insights.js"></script>
 <script src="js/pages/ad-monitor.js?v=20261027f"></script>
-<script src="js/pages/promo-remove.js?v=20261104c"></script>
+<script src="js/pages/promo-remove.js?v=20261104-ui2"></script>
 <script src="js/pages/dashboard-control.js"></script>
-<script src="js/pages/finance-center.js"></script>
+<script src="js/pages/finance-center.js?v=20261104-ui2"></script>
 <script src="assets/qrcode.min.js?v=20261106a"></script>
 <script src="js/pages/recharge.js?v=20261106b"></script>
 <!-- 应用入口 -->
@@ -835,3 +879,20 @@
 
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
