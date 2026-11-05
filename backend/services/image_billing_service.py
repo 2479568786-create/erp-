@@ -410,7 +410,11 @@ def topup_summary(account_id=None):
       仍只算 `balance_add`，语义不变；
     - `correction_points`：`billing_correction` 合计（如多扣退回、误覆盖补回）；
     - `adjustment_points`：`balance_set` 覆盖式调整合计（当前线上为 0）；
-    - `net_balance_delta` = 三者相加 = 余额净变化（充值净额 + 修正 + 覆盖调整）。
+    - `net_balance_delta` = 三者相加（充值净额 + 修正 + 覆盖调整），是**账面净变化**，
+      **不等于余额差**：`billing_correction` 是否真的改了 accounts 余额取决于写入方式。
+      线上 11.11 那两笔只有台账记录、没落到余额（等式 `初始额度 + 充值 − image_usage 累计 = 余额`
+      只有不含修正时才精确成立）。算「已消耗」请用 image_usage 累计，或
+      `初始额度 + total_points − 余额`；不要用 `net_balance_delta − 余额`。
     """
     params = []
     where = "action = 'balance_add' AND amount_cents != 0"

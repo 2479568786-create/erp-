@@ -1065,7 +1065,8 @@ async function showUserTopupLog() {
         · 冲销 ${reversalPoints.toFixed(2)}（负数行为冲销/退款；接口的 total_points 已是净额）<br>
         余额调整 <b>+${(correctionPoints + adjustmentPoints).toFixed(2)}</b> 点
         （修正 ${correctionPoints.toFixed(2)} / 覆盖 ${adjustmentPoints.toFixed(2)}，不进充值净额，但会改变余额）
-        · 余额净变化 <b>${netDeltaPoints.toFixed(2)}</b> 点
+        · 账面净变化 <b>${netDeltaPoints.toFixed(2)}</b> 点（充值+修正，<b>不等于</b>余额差：修正未落到余额）
+        <br><span style="font-size:12px;">算已消耗请看「图库/用量」的扣点累计，或用「初始额度 + 充值 − 当前余额」</span>
       </p>
       <div style="overflow:auto;max-height:420px;">
         <table class="collect-table" style="width:100%;min-width:0;font-size:13px;table-layout:auto;">
