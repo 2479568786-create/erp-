@@ -406,6 +406,33 @@ class ImageBillingTests(unittest.TestCase):
         self.assertEqual(-3.0, data['reversal_points'])
         self.assertEqual(0.0, data['total_points'])
 
+    def test_topup_summary_counts_adjustments_separately(self):
+        """余额调整（billing_correction / balance_set）单独统计，不进充值净额。"""
+        billing.topup(self.user_id, 5, reason='充值', operator='admin')
+        billing._write_ops_log(self.user_id, 'billing_correction',
+                               {'balance_points': 45.0}, {'balance_points': 46.11},
+                               'tester', '补回测试', amount_cents=111)
+
+        resp = self.client.get('/api/image-billing/topups',
+                               headers={'Authorization': 'Bearer ' + self.admin_token})
+        d = resp.get_json()['data']
+        self.assertEqual(1, len(d['list']))            # 默认不带调整行
+        self.assertEqual('topup', d['list'][0]['kind'])
+        self.assertEqual(5.0, d['total_points'])
+        self.assertEqual(1.11, d['correction_points'])
+        self.assertEqual(0.0, d['adjustment_points'])
+        self.assertEqual(6.11, d['net_balance_delta'])
+
+        resp2 = self.client.get('/api/image-billing/topups?include_adjustments=1',
+                                headers={'Authorization': 'Bearer ' + self.admin_token})
+        d2 = resp2.get_json()['data']
+        self.assertTrue(d2['include_adjustments'])
+        self.assertEqual(2, len(d2['list']))
+        self.assertIn('correction', [r['kind'] for r in d2['list']])
+        # 汇总字段不受 include_adjustments 影响
+        self.assertEqual(5.0, d2['total_points'])
+        self.assertEqual(6.11, d2['net_balance_delta'])
+
     # ---------------------------------------------------------------- 生图入口（应用层计费守卫）
     def _gallery_app(self):
         from routes.gallery_routes import gallery_bp

@@ -167,9 +167,12 @@ def get_config():
 def ext_topups():
     account_id = _int_arg('account_id')
     limit = _int_arg('limit', 100) or 100
-    rows = billing.topup_logs(account_id=account_id, limit=limit)
-    data = {'list': rows}
-    data.update(billing.topup_totals(rows))
+    include_adjustments = (request.args.get('include_adjustments') or '').strip().lower() in (
+        '1', 'true', 'yes', 'on')
+    rows = billing.topup_logs(account_id=account_id, limit=limit,
+                              include_adjustments=include_adjustments)
+    data = {'list': rows, 'include_adjustments': include_adjustments}
+    data.update(billing.topup_summary(account_id=account_id))
     return success_response(data)
 
 
@@ -182,9 +185,12 @@ def admin_topups():
     """管理员：充值流水（对账用）。"""
     account_id = _int_arg('account_id')
     limit = _int_arg('limit', 100) or 100
-    rows = billing.topup_logs(account_id=account_id, limit=limit)
-    data = {'list': rows}
-    data.update(billing.topup_totals(rows))
+    include_adjustments = (request.args.get('include_adjustments') or '').strip().lower() in (
+        '1', 'true', 'yes', 'on')
+    rows = billing.topup_logs(account_id=account_id, limit=limit,
+                              include_adjustments=include_adjustments)
+    data = {'list': rows, 'include_adjustments': include_adjustments}
+    data.update(billing.topup_summary(account_id=account_id))
     return success_response(data)
 
 

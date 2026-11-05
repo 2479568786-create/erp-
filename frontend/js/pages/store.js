@@ -1033,19 +1033,26 @@ async function showUserTopupLog() {
   const totalPoints = Number(data.total_points || 0);
   const positivePoints = Number(data.total_positive_points || 0);
   const reversalPoints = Number(data.reversal_points || 0);
+  const correctionPoints = Number(data.correction_points || 0);   // 修正（如多扣退回/补回）
+  const adjustmentPoints = Number(data.adjustment_points || 0);   // 覆盖式调整
+  const netDeltaPoints = Number(data.net_balance_delta != null ? data.net_balance_delta : totalPoints);
+  // 账号名映射：本页未打开过用户管理时缓存为空，先拉一次，避免显示成 #1
+  if (!_usersCache.length) {
+    try { _usersCache = await loadUsers(); } catch (e) { /* 拉不到就退回 #id */ }
+  }
   const usernames = {};
   _usersCache.forEach(u => { usernames[u.id] = u.username; });
   const body = rows.length ? rows.map(r => `
     <tr>
-      <td>${r.created_at || '-'}</td>
-      <td>${usernames[r.account_id] || ('#' + r.account_id)}</td>
+      <td style="white-space:nowrap;">${r.created_at || '-'}</td>
+      <td style="white-space:nowrap;">${usernames[r.account_id] || ('#' + r.account_id)}</td>
       <td>${(r.is_reversal || Number(r.points || 0) < 0)
         ? `<span style="color:#b42318;font-weight:600;">${Number(r.points || 0).toFixed(2)}</span>
            <span style="font-size:11px;padding:1px 6px;border-radius:8px;background:#f2f4f7;color:#667085;">冲销</span>`
         : `<span style="color:#16a34a;font-weight:600;">+${Number(r.points || 0).toFixed(2)}</span>`}</td>
       <td>${r.balance_after == null ? '-' : Number(r.balance_after).toFixed(2)}</td>
       <td>${r.operator || '-'}</td>
-      <td>${r.reason || '-'}</td>
+      <td style="white-space:normal;word-break:break-all;">${r.reason || '-'}</td>
     </tr>`).join('')
     : '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-tertiary);">暂无充值记录</td></tr>';
   Modal.show({
@@ -1055,12 +1062,22 @@ async function showUserTopupLog() {
       <p style="font-size:13px;color:var(--text-tertiary);margin-bottom:12px;">最近 100 条「加点数」记录，用于和外部台账对账（1 点 = 1 元）。<br>
         <b style="color:var(--text-primary);">净额 ${totalPoints.toFixed(2)} 点</b>
         · 正向累计 +${positivePoints.toFixed(2)}
-        · 冲销 ${reversalPoints.toFixed(2)}（负数行为冲销/退款；接口的 total_points 已是净额）
+        · 冲销 ${reversalPoints.toFixed(2)}（负数行为冲销/退款；接口的 total_points 已是净额）<br>
+        余额调整 <b>+${(correctionPoints + adjustmentPoints).toFixed(2)}</b> 点
+        （修正 ${correctionPoints.toFixed(2)} / 覆盖 ${adjustmentPoints.toFixed(2)}，不进充值净额，但会改变余额）
+        · 余额净变化 <b>${netDeltaPoints.toFixed(2)}</b> 点
       </p>
       <div style="overflow:auto;max-height:420px;">
-        <table class="collect-table" style="width:100%;font-size:13px;">
+        <table class="collect-table" style="width:100%;min-width:0;font-size:13px;table-layout:auto;">
           <thead>
-            <tr><th>时间</th><th>账号</th><th>加点数</th><th>充值后余额</th><th>操作人</th><th>备注</th></tr>
+            <tr>
+              <th style="width:134px;white-space:nowrap;">时间</th>
+              <th style="width:92px;">账号</th>
+              <th style="width:116px;">加点数</th>
+              <th style="width:108px;">充值后余额</th>
+              <th style="width:92px;">操作人</th>
+              <th>备注</th>
+            </tr>
           </thead>
           <tbody>${body}</tbody>
         </table>

@@ -340,44 +340,111 @@ def topup(account_id, points, reason='', operator=''):
                           reason=reason or '管理员充值', operator=operator)
 
 
-def topup_logs(account_id=None, limit=100):
-    """充值流水（image_ops_log 里 action=balance_add 且金额非 0 的记录）。
+def _kind_of(action, cents):
+    """流水行类别：topup（充值）/ reversal（冲销·退款）/ correction（修正）/ set（覆盖式调整）。"""
+    if action == 'billing_correction':
+        return 'correction'
+    if action == 'balance_set':
+        return 'set'
+    return 'reversal' if cents < 0 else 'topup'
 
-    口径（2026-11-06 改，加法式、不破坏旧字段）：
-    - 正向行 points > 0：真实充值/加点；
-    - 负数行 points < 0：冲销 / 微信退款等，`is_reversal=True`；
-      旧实现用 `amount_cents > 0` 把负数行过滤掉、却仍把 sum 当累计充值报出去，账本自证不成立。
-    - 汇总口径见 `topup_totals()`：`total_points` 是**净额**，另给正向累计与冲销累计。
+
+def topup_logs(account_id=None, limit=100, include_adjustments=False):
+    """充值流水（默认只含 action=balance_add 且金额非 0 的记录）。
+
+    - points > 0 是真实充值/加点；points < 0 是冲销/退款，`is_reversal=True`，`kind` 为 reversal；
+    - `include_adjustments=True` 时额外带出 `billing_correction` / `balance_set`
+      （余额调整、不是充值），这些行 `kind` 为 correction / set，不进充值净额；
+    - 每行都带 `kind`，消费方按 `kind` / `is_reversal` 分类，不靠 reason 文字约定。
     """
     limit = max(1, min(int(limit or 100), 500))
-    sql = ('SELECT id, account_id, amount_cents, after_json, operator, reason, created_at '
-           "FROM image_ops_log WHERE action = 'balance_add' AND amount_cents != 0")
-    params = []
-    if account_id is not None:
-        sql += ' AND account_id = ?'
-        params.append(int(account_id))
-    sql += ' ORDER BY id DESC LIMIT ?'
-    params.append(limit)
     import json
-    rows = query(sql, params)
-    result = []
-    for row in rows:
+
+    def _row_dict(row):
         try:
             after = json.loads(row.get('after_json') or '{}')
         except (TypeError, ValueError):
             after = {}
         cents = int(row.get('amount_cents') or 0)
-        result.append({
+        action = row.get('action') or 'balance_add'
+        return {
             'id': row['id'],
             'account_id': row['account_id'],
             'points': cents_to_points(cents),
             'is_reversal': cents < 0,
+            'kind': _kind_of(action, cents),
             'balance_after': after.get('balance_points'),
             'operator': row.get('operator') or '',
             'reason': row.get('reason') or '',
             'created_at': row.get('created_at') or '',
-        })
-    return result
+        }
+
+    sel = ('SELECT id, account_id, action, amount_cents, after_json, operator, reason, created_at '
+           'FROM image_ops_log WHERE ')
+    params = []
+    sql = sel + "action = 'balance_add' AND amount_cents != 0"
+    if account_id is not None:
+        sql += ' AND account_id = ?'
+        params.append(int(account_id))
+    sql += ' ORDER BY id DESC LIMIT ?'
+    rows = query(sql, tuple(params) + (limit,))
+
+    if include_adjustments:
+        params2 = []
+        sql2 = sel + "action IN ('billing_correction', 'balance_set') AND amount_cents != 0"
+        if account_id is not None:
+            sql2 += ' AND account_id = ?'
+            params2.append(int(account_id))
+        sql2 += ' ORDER BY id DESC LIMIT ?'
+        rows = list(rows) + list(query(sql2, tuple(params2) + (limit,)))
+        rows.sort(key=lambda r: r['id'], reverse=True)
+        rows = rows[:limit]
+
+    return [_row_dict(r) for r in rows]
+
+
+def topup_summary(account_id=None):
+    """全量汇总（SQL 聚合，**不受 list 的 limit 截断**）。
+
+    - `total_points` 净额 / `total_positive_points` 正向累计 / `reversal_points` 冲销累计：
+      仍只算 `balance_add`，语义不变；
+    - `correction_points`：`billing_correction` 合计（如多扣退回、误覆盖补回）；
+    - `adjustment_points`：`balance_set` 覆盖式调整合计（当前线上为 0）；
+    - `net_balance_delta` = 三者相加 = 余额净变化（充值净额 + 修正 + 覆盖调整）。
+    """
+    params = []
+    where = "action = 'balance_add' AND amount_cents != 0"
+    if account_id is not None:
+        where += ' AND account_id = ?'
+        params.append(int(account_id))
+    row = query('SELECT '
+                'COALESCE(SUM(CASE WHEN amount_cents > 0 THEN amount_cents ELSE 0 END), 0) AS p, '
+                'COALESCE(SUM(CASE WHEN amount_cents < 0 THEN amount_cents ELSE 0 END), 0) AS r '
+                'FROM image_ops_log WHERE ' + where, tuple(params), one=True) or {}
+
+    params2 = []
+    where2 = "action IN ('billing_correction', 'balance_set') AND amount_cents != 0"
+    if account_id is not None:
+        where2 += ' AND account_id = ?'
+        params2.append(int(account_id))
+    adj = query("SELECT "
+                "COALESCE(SUM(CASE WHEN action = 'billing_correction' THEN amount_cents ELSE 0 END), 0) AS c, "
+                "COALESCE(SUM(CASE WHEN action = 'balance_set' THEN amount_cents ELSE 0 END), 0) AS s "
+                "FROM image_ops_log WHERE " + where2, tuple(params2), one=True) or {}
+
+    positive = int(row.get('p') or 0)
+    reversal = int(row.get('r') or 0)
+    correction = int(adj.get('c') or 0)
+    adjustment = int(adj.get('s') or 0)
+    net = positive + reversal
+    return {
+        'total_points': round(cents_to_points(net), 2),
+        'total_positive_points': round(cents_to_points(positive), 2),
+        'reversal_points': round(cents_to_points(reversal), 2),
+        'correction_points': round(cents_to_points(correction), 2),
+        'adjustment_points': round(cents_to_points(adjustment), 2),
+        'net_balance_delta': round(cents_to_points(net + correction + adjustment), 2),
+    }
 
 
 def topup_totals(rows):
