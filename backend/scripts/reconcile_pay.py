@@ -8,7 +8,7 @@
 3. 打印统计，异常退出码 1 供 cron 告警。
 
 用法：
-    /srv/geekozon-erp/backend/.venv/bin/python /srv/geekozon-erp/backend/scripts/reconcile_pay.py [--dry-run]
+    /srv/<app>/backend/.venv/bin/python /srv/<app>/backend/scripts/reconcile_pay.py [--dry-run]
 """
 import os
 import sys
