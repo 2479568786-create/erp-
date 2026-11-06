@@ -436,6 +436,20 @@ def topup_summary(account_id=None):
                 "COALESCE(SUM(CASE WHEN action = 'balance_set' THEN amount_cents ELSE 0 END), 0) AS s "
                 "FROM image_ops_log WHERE " + where2, tuple(params2), one=True) or {}
 
+    # 用量与余额快照（只读，用于账本自证：初始额度 + total_points − usage_points = balance_points）
+    params3 = []
+    where3 = '1 = 1'
+    if account_id is not None:
+        where3 += ' AND account_id = ?'
+        params3.append(int(account_id))
+    use = query('SELECT COALESCE(SUM(cost_points), 0) AS p, COUNT(*) AS n '
+                'FROM image_usage WHERE ' + where3, tuple(params3), one=True) or {}
+    if account_id is not None:
+        bal = query('SELECT COALESCE(image_balance_cents, 0) AS b FROM accounts WHERE id = ?',
+                    (int(account_id),), one=True) or {}
+    else:
+        bal = query('SELECT COALESCE(SUM(image_balance_cents), 0) AS b FROM accounts', one=True) or {}
+
     positive = int(row.get('p') or 0)
     reversal = int(row.get('r') or 0)
     correction = int(adj.get('c') or 0)
@@ -448,6 +462,9 @@ def topup_summary(account_id=None):
         'correction_points': round(cents_to_points(correction), 2),
         'adjustment_points': round(cents_to_points(adjustment), 2),
         'net_balance_delta': round(cents_to_points(net + correction + adjustment), 2),
+        'usage_points': round(float(use.get('p') or 0), 2),
+        'usage_images': int(use.get('n') or 0),
+        'balance_points': round(cents_to_points(int(bal.get('b') or 0)), 2),
     }
 
 

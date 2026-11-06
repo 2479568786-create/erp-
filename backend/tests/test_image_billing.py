@@ -433,6 +433,18 @@ class ImageBillingTests(unittest.TestCase):
         self.assertEqual(5.0, d2['total_points'])
         self.assertEqual(6.11, d2['net_balance_delta'])
 
+    def test_summary_exposes_usage_and_balance_snapshot(self):
+        """汇总带 usage_points / balance_points：初始额度 + 充值 − 用量 = 余额（自证等式）。"""
+        before = self._balance_cents(self.user_id) / 100.0      # 种子 40 点
+        billing.topup(self.user_id, 5, reason='充值', operator='admin')
+        resp = self.client.get('/api/image-billing/topups?account_id=%d' % self.user_id,
+                               headers={'Authorization': 'Bearer ' + self.admin_token})
+        d = resp.get_json()['data']
+        self.assertEqual(before + 5.0, d['balance_points'])
+        self.assertEqual(0.0, d['usage_points'])
+        self.assertEqual(0, d['usage_images'])
+        self.assertAlmostEqual(d['balance_points'] - d['total_points'], before, places=2)
+
     # ---------------------------------------------------------------- 生图入口（应用层计费守卫）
     def _gallery_app(self):
         from routes.gallery_routes import gallery_bp
