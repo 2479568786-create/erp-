@@ -460,6 +460,27 @@ class ImageBillingTests(unittest.TestCase):
         self.assertAlmostEqual(d['initial_grant'] + d['total_points'] - d['usage_points'],
                                d['balance_points'], places=2)
 
+    def test_accounts_rows_carry_reconciliation_fields(self):
+        """逐账号也要能自证：/accounts 每行带 initial_grant / total_points / usage_points / balance_points。"""
+        import os
+        from unittest import mock
+
+        billing.topup(self.user_id, 5, reason='充值', operator='admin')
+        grant = self._balance_cents(self.user_id) / 100.0 - 5.0
+        with mock.patch.dict(os.environ, {'IMAGE_BILLING_INITIAL_GRANTS': '%d:%g' % (self.user_id, grant)}):
+            resp = self.client.get('/api/ext/image-billing/accounts', headers=self._headers())
+            rows = resp.get_json()['data']['list']
+        row = [r for r in rows if r['account_id'] == self.user_id][0]
+        for key in ('initial_grant', 'total_points', 'usage_points', 'balance_points'):
+            self.assertIn(key, row)
+        self.assertEqual(round(grant, 2), row['initial_grant'])
+        self.assertEqual(5.0, row['total_points'])
+        self.assertEqual(0.0, row['usage_points'])
+        self.assertAlmostEqual(row['initial_grant'] + row['total_points'] - row['usage_points'],
+                               row['balance_points'], places=2)
+        # 兼容字段仍在
+        self.assertEqual(row['image_balance'], row['balance_points'])
+
     # ---------------------------------------------------------------- 生图入口（应用层计费守卫）
     def _gallery_app(self):
         from routes.gallery_routes import gallery_bp

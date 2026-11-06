@@ -160,13 +160,35 @@ def _usage_sum(account_id=None, since=None):
     }
 
 
-def account_billing(account_id):
-    """单账号计费快照：余额、开关、今日/近 7 天/近 30 天/累计消耗。"""
+def _topup_net_map():
+    """一次算出各账号充值净额（balance_add 正负相抵），供 /accounts 逐账号自证用。"""
+    rows = query('SELECT account_id, '
+                 'COALESCE(SUM(CASE WHEN amount_cents > 0 THEN amount_cents ELSE 0 END), 0) AS p, '
+                 'COALESCE(SUM(CASE WHEN amount_cents < 0 THEN amount_cents ELSE 0 END), 0) AS r '
+                 "FROM image_ops_log WHERE action = 'balance_add' AND amount_cents != 0 "
+                 'GROUP BY account_id', one=False)
+    return {int(x['account_id']): round(cents_to_points(int(x['p']) + int(x['r'])), 2)
+            for x in rows}
+
+
+def account_billing(account_id, net_map=None):
+    """单账号计费快照：余额、开关、今日/近 7 天/近 30 天/累计消耗。
+
+    另给账本自证四件套（只读，配合 `/topups` 顶层同名字段）：
+    `initial_grant`（env 配置的历史初始额度，未配置为 None）、`total_points`（充值净额）、
+    `usage_points`（累计扣点）、`balance_points`（当前余额，与 `image_balance` 同值，便于直接对等式）。
+    自证等式：`initial_grant + total_points - usage_points == balance_points`。
+    """
     row = _account_row(account_id)
     if not row:
         return None
     cents = _balance_cents(row)
     role = row.get('role') or ''
+    account_id_int = int(row.get('id'))
+    if net_map is None:
+        net_map = _topup_net_map()
+    grants = initial_grants()
+    spent_total = _usage_sum(row.get('id'))
     return {
         'account_id': row.get('id'),
         'username': row.get('username'),
@@ -181,13 +203,19 @@ def account_billing(account_id):
         'spent_today': _usage_sum(row.get('id'), _today()),
         'spent_7d': _usage_sum(row.get('id'), _days_ago(6)),
         'spent_30d': _usage_sum(row.get('id'), _days_ago(29)),
-        'spent_total': _usage_sum(row.get('id')),
+        'spent_total': spent_total,
+        # —— 账本自证四件套（只加不删；initial_grant 未配置时为 None）——
+        'initial_grant': (round(grants[account_id_int], 2) if account_id_int in grants else None),
+        'total_points': float(net_map.get(account_id_int, 0.0)),
+        'usage_points': round(float(spent_total.get('cost_points') or 0), 2),
+        'balance_points': cents_to_points(cents),
     }
 
 
 def list_accounts_billing():
     rows = query('SELECT %s FROM accounts ORDER BY id' % _ACCOUNT_COLUMNS)
-    return [account_billing(row) for row in rows]
+    net_map = _topup_net_map()
+    return [account_billing(row, net_map=net_map) for row in rows]
 
 
 # ------------------------------------------------------------------ 生图闸门
