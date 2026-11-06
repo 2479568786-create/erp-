@@ -20,7 +20,7 @@ ALIPAY_ENABLED=1                     # 上线才置 1，先留 0
 ALIPAY_APPID=                        # 开放平台应用 AppID
 ALIPAY_PRIVATE_KEY_PATH=/etc/geekozon-erp-pay/alipay/app_private_key.pem   # PKCS#8
 ALIPAY_PUBLIC_KEY_PATH=/etc/geekozon-erp-pay/alipay/alipay_public_key.pem  # 支付宝公钥（不是应用公钥）
-ALIPAY_NOTIFY_URL=https://tugeekfast.xin/api/pay/alipay/notify
+ALIPAY_NOTIFY_URL=https://<your-domain>/api/pay/alipay/notify
 ALIPAY_GATEWAY=https://openapi.alipay.com/gateway.do                       # 沙箱换成 openapi.alipaydev.com
 ```
 改动 env 后：`systemctl restart geekozon-erp`（`kill -HUP` 不会重读 `EnvironmentFile`）。
@@ -30,10 +30,10 @@ ALIPAY_GATEWAY=https://openapi.alipay.com/gateway.do                       # 沙
 
 ```bash
 # 渠道状态（管理员：能看到 missing 明细与 notify_url）
-curl -s -H "Authorization: Bearer $JWT" http://127.0.0.1:5001/api/pay/status | python -m json.tool
+curl -s -H "Authorization: Bearer $JWT" http://127.0.0.1:<port>/api/pay/status | python -m json.tool
 
 # 最近事件（只读库）
-sqlite3 /srv/geekozon-erp/backend/data/geekozon.db \
+sqlite3 /srv/<app>/backend/data/geekozon.db \
   "SELECT created_at, out_trade_no, event, substr(detail,1,80) FROM pay_events ORDER BY id DESC LIMIT 20;"
 
 # 已支付未入账（应长期为空）
@@ -46,8 +46,8 @@ sqlite3 …/geekozon.db "SELECT out_trade_no, channel, created_at FROM pay_order
 ## 4. 对账补偿（回调丢了也能补）
 
 ```bash
-cd /srv/geekozon-erp/backend
-PYTHONPATH=/srv/geekozon-erp/backend .venv/bin/python -m services.pay_reconcile
+cd /srv/<app>/backend
+PYTHONPATH=/srv/<app>/backend .venv/bin/python -m services.pay_reconcile
 ```
 输出：`{checked, credited, skipped, failed, credit_retried, queried, details[]}`。
 
@@ -58,7 +58,7 @@ PYTHONPATH=/srv/geekozon-erp/backend .venv/bin/python -m services.pay_reconcile
 建议 cron（每 10 分钟，避开整点）：
 
 ```cron
-*/10 * * * * cd /srv/geekozon-erp/backend && PYTHONPATH=/srv/geekozon-erp/backend .venv/bin/python -m services.pay_reconcile >> /var/log/geekozon-pay-reconcile.log 2>&1
+*/10 * * * * cd /srv/<app>/backend && PYTHONPATH=/srv/<app>/backend .venv/bin/python -m services.pay_reconcile >> /var/log/<app>-pay-reconcile.log 2>&1
 ```
 **注意**：脚本只处理 `channel='alipay'` 的订单，微信订单不会被它碰。
 
