@@ -76,6 +76,19 @@ PYTHONPATH=/srv/<app>/backend .venv/bin/python -m services.pay_reconcile
 
 **应答必须是纯文本 `success`**：返回 JSON 会被支付宝判失败并重试 25 小时。
 
+## 5.5 预下单（A5，当面付 `alipay.trade.precreate`）
+
+```
+POST /api/pay/orders   {"points": 10, "channel": "alipay"}
+→ 200 {"out_trade_no":"RC…","code_url":"https://qr.alipay.com/…","channel":"alipay",
+       "channel_label":"支付宝扫码","points":10,"amount_cents":1000,"expires_in":900}
+```
+- 不传 `channel` 时用主通道（`PAY_PRIMARY_CHANNEL`）；传了不认识的值直接 **400**；
+- biz_content：`out_trade_no` / `total_amount`（**元，两位小数**）/ `subject`（截 256）/ `timeout_express=15m`（与本地 TTL 一致）；
+- 错误映射：渠道未启用或缺配置 → **503**；支付宝业务码非 10000 → **502**（带 `code/sub_code`）；网关不可达 → **502**；私钥读不到 → **503**；
+- **任何下单失败都会把刚建的本地订单置 `closed`** 并记 `create_fail` 事件，不留 `created` 僵尸单；
+- 沙箱联调：`ALIPAY_GATEWAY=https://openapi.alipaydev.com/gateway.do` + 沙箱凭证（`/etc/geekozon-erp-pay/alipay-sandbox/`），沙箱扫码是虚拟钱但**会真加点数**，只能用专用测试账号并在跑完后按 `out_trade_no` 冲销。
+
 ## 6. 退款（M3 占位，当前路由仍返回 501）
 
 表已就绪：`pay_refunds(id, out_trade_no, channel, out_request_no UNIQUE, amount_cents, reason, status, trade_no, refund_no, notify_digest, created_at, updated_at)`。

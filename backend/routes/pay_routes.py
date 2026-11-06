@@ -153,14 +153,23 @@ def create_order():
     if err:
         return err
 
-    cfg = wxpay_service.config()
-    if not cfg['enabled']:
-        return error_response('支付未启用（WECHATPAY_ENABLED=0）', 503)
-    missing = wxpay_service.missing_config()
-    if missing:
-        return error_response('支付配置不完整：缺少 %s' % '、'.join(missing), 503)
-
     body = request.get_json(silent=True) or {}
+
+    # 渠道选择：显式传 channel 优先，否则用主通道；不认识的值直接 400
+    channels = {name: _channel_state(name) for name in CHANNEL_ORDER}
+    requested = (body.get('channel') or '').strip().lower()
+    if requested and requested not in channels:
+        return error_response('不支持的支付渠道：%s' % requested[:20], 400)
+    channel = requested or _primary_channel(channels)
+    state = channels[channel]
+    channel_label = CHANNEL_LABELS.get(channel, channel)
+
+    if not state['enabled']:
+        return error_response('%s未启用（%s_ENABLED=0）'
+                              % (channel_label, channel.upper()), 503)
+    if state['missing']:
+        return error_response('%s配置不完整：缺少 %s' % (channel_label, '、'.join(state['missing'])), 503)
+
     ok, points, reason = pay_service.validate_points(body.get('points'))
     if not ok:
         return error_response(reason, 400)
@@ -183,25 +192,46 @@ def create_order():
         return error_response('下单太频繁，请稍后再试', 429)
 
     out_trade_no = pay_service.new_out_trade_no()
-    pay_service.create_order(out_trade_no, account_id, int(user['id']), points, points * 100)
+    pay_service.create_order(out_trade_no, account_id, int(user['id']), points, points * 100,
+                             channel=channel)
     try:
-        resp = wxpay_service.create_native_order(
-            out_trade_no, 'Geekfast ERP 图片点数充值 %s 点' % points, points * 100)
-    except Exception as exc:  # noqa: BLE001
+        if channel == 'alipay':
+            resp = alipay_service.precreate(
+                out_trade_no, points * 100,
+                subject='Geekfast ERP 图片点数充值 %s 点' % points,
+                timeout_express='%dm' % pay_service.ORDER_TTL_MINUTES)
+            code_url = (resp.get('qr_code') or '').strip()
+            prepay_id = None
+        else:
+            resp = wxpay_service.create_native_order(
+                out_trade_no, 'Geekfast ERP 图片点数充值 %s 点' % points, points * 100)
+            code_url = (resp.get('code_url') or '').strip()
+            prepay_id = resp.get('prepay_id') or None
+    except alipay_service.AlipayBizError as exc:
+        pay_service.close_order(out_trade_no)
+        pay_service.log_event(out_trade_no, 'create_fail',
+                              'biz:%s/%s' % (exc.code, exc.sub_code))
+        return error_response('%s下单失败：%s %s' % (channel_label, exc.code, exc.sub_code), 502)
+    except alipay_service.AlipayConfigError as exc:
+        pay_service.close_order(out_trade_no)
+        pay_service.log_event(out_trade_no, 'create_fail', 'config:%s' % type(exc).__name__)
+        return error_response('%s配置错误，请联系管理员' % channel_label, 503)
+    except Exception as exc:  # noqa: BLE001 - 网络/网关/微信侧错误
         pay_service.close_order(out_trade_no)
         pay_service.log_event(out_trade_no, 'create_fail', str(exc)[:300])
-        return error_response('微信下单失败：%s' % str(exc)[:160], 502)
+        return error_response('%s下单失败：%s' % (channel_label, str(exc)[:160]), 502)
 
-    code_url = resp.get('code_url') or ''
-    prepay_id = resp.get('prepay_id') or None
     if not code_url:
         pay_service.close_order(out_trade_no)
-        return error_response('微信未返回二维码', 502)
+        return error_response('%s未返回二维码' % channel_label, 502)
     pay_service.set_code_url(out_trade_no, code_url, prepay_id)
-    pay_service.log_event(out_trade_no, 'create', 'points=%s account=%s' % (points, account_id))
+    pay_service.log_event(out_trade_no, 'create',
+                          'points=%s account=%s channel=%s' % (points, account_id, channel))
     return success_response({
         'out_trade_no': out_trade_no,
         'code_url': code_url,
+        'channel': channel,
+        'channel_label': channel_label,
         'points': points,
         'amount_cents': points * 100,
         'account_id': account_id,

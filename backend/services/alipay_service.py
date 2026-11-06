@@ -37,6 +37,31 @@ _public_key_cache = {}
 _AMOUNT_RE = re.compile(r'^\d{1,7}(\.\d{1,2})?$')
 
 
+# ---------------- 异常（路由层按类型映射 HTTP 状态） ----------------
+
+class AlipayError(RuntimeError):
+    """支付宝适配器错误基类。"""
+
+
+class AlipayConfigError(AlipayError):
+    """配置/密钥类问题：路由层应回 503（不是用户的错，也不是伪造）。"""
+
+
+class AlipayTransportError(AlipayError):
+    """网络/网关层失败：路由层应回 502。"""
+
+
+class AlipayBizError(AlipayError):
+    """业务失败（code != 10000）：携带 code / sub_code 供排障，不打日志值时注意。"""
+
+    def __init__(self, code, sub_code='', message=''):
+        self.code = str(code or '')
+        self.sub_code = str(sub_code or '')
+        self.message = str(message or '')
+        super(AlipayBizError, self).__init__(
+            '支付宝业务失败：code=%s sub_code=%s' % (self.code, self.sub_code))
+
+
 def _env(name, default=''):
     return (os.environ.get(name) or default).strip()
 
@@ -240,9 +265,11 @@ def _post_form(params, cfg, timeout=15):
             raw = resp.read(MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
         detail = exc.read(MAX_RESPONSE_BYTES).decode('utf-8', 'replace')[:300]
-        raise RuntimeError('支付宝网关 HTTP %s：%s' % (exc.code, detail))
+        raise AlipayTransportError('支付宝网关 HTTP %s：%s' % (exc.code, detail))
+    except Exception as exc:  # noqa: BLE001 - 连接失败/超时/DNS
+        raise AlipayTransportError('支付宝网关不可达：%s: %s' % (type(exc).__name__, exc))
     if len(raw) > MAX_RESPONSE_BYTES:
-        raise RuntimeError('支付宝响应过大')
+        raise AlipayTransportError('支付宝响应过大')
     return raw.decode('utf-8')
 
 
@@ -310,11 +337,23 @@ def request(method, biz_content, cfg=None, private_key=None, public_key=None,
     cfg = cfg or config()
     params = build_common_params(method, biz_content, cfg=cfg, notify_url=notify_url,
                                  with_notify_url=(method in NOTIFY_METHODS))
-    params['sign'] = sign(params, private_key=private_key,
-                          private_key_path=cfg['private_key_path'])
+    try:
+        params['sign'] = sign(params, private_key=private_key,
+                              private_key_path=cfg['private_key_path'])
+    except OSError as exc:      # 私钥缺失/不可读 → 配置问题，不该算作下单失败
+        raise AlipayConfigError('读取应用私钥失败：%s' % type(exc).__name__)
     raw = (http_post or _post_form)(params, cfg)
     node_key = method.replace('.', '_') + '_response'
     return parse_response(raw, node_key, public_key=public_key, verify=verify)
+
+
+def require_ok(node):
+    """校验业务码：`code` 缺省或 10000 视为成功，否则抛 AlipayBizError。"""
+    code = str(node.get('code') or '')
+    if code and code != '10000':
+        raise AlipayBizError(code, node.get('sub_code') or '',
+                             node.get('sub_msg') or node.get('msg') or '')
+    return node
 
 
 def query_trade(out_trade_no, cfg=None, **kwargs):
@@ -325,3 +364,25 @@ def query_trade(out_trade_no, cfg=None, **kwargs):
 def close_trade(out_trade_no, cfg=None, **kwargs):
     """alipay.trade.close：关单（为避免关掉已支付订单，调用前应先 query）。"""
     return request('alipay.trade.close', {'out_trade_no': out_trade_no}, cfg=cfg, **kwargs)
+
+
+def precreate(out_trade_no, amount_cents, subject='Geekfast ERP 图片点数充值',
+              timeout_express='15m', passback_params=None, cfg=None, **kwargs):
+    """alipay.trade.precreate（当面付）：预下单，返回响应节点（含 `qr_code`）。
+
+    - 金额单位是**元**且两位小数字符串（`cents_to_yuan`），不是分；
+    - `timeout_express` 与本地订单 TTL（15 分钟）保持一致；
+    - `passback_params` 可回传业务标记（支付宝原样带回），这里默认不用。
+    """
+    biz = {
+        'out_trade_no': out_trade_no,
+        'total_amount': cents_to_yuan(amount_cents),
+        'subject': str(subject or 'Geekfast ERP 充值')[:256],
+        'timeout_express': timeout_express,
+    }
+    if passback_params:
+        biz['passback_params'] = str(passback_params)[:512]
+    node = require_ok(request('alipay.trade.precreate', biz, cfg=cfg, **kwargs))
+    if not str(node.get('qr_code') or '').strip():
+        raise AlipayError('预下单成功但未返回 qr_code')
+    return node
