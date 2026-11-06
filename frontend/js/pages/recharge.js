@@ -240,9 +240,26 @@ const RechargePage = (() => {
     }
   }
 
-  function canPay() {
+  /** 渠道短名（微信/支付宝），用于文案与订单列表 */
+  function channelName(name) {
+    if (window.PayReady && typeof window.PayReady.channelShort === 'function') {
+      return PayReady.channelShort(state.status, name);
+    }
+    return name === 'alipay' ? '支付宝' : (name === 'wxpay' ? '微信' : (name || '-'));
+  }
+
+  /** 当前充值可用性：按 primary_channel/channels 判定，兼容旧后端 */
+  function readiness() {
+    if (window.PayReady && typeof window.PayReady.payReadiness === 'function') {
+      return PayReady.payReadiness(state.status);
+    }
     const st = state.status;
-    return !!(st && st.enabled && st.ready);
+    const ok = !!(st && st.enabled && st.ready);
+    return { canPay: ok, channel: ok ? 'wxpay' : null, label: ok ? '微信扫码' : '', primary: null };
+  }
+
+  function canPay() {
+    return !!readiness().canPay;
   }
 
   function renderTiers() {
@@ -285,13 +302,14 @@ const RechargePage = (() => {
       <div style="overflow-x:auto;">
         <table class="rc-table">
           <thead><tr>
-            <th>时间</th><th>订单号</th>${showAccount ? '<th>账号</th>' : ''}<th>点数</th><th>金额</th><th>状态</th>
+            <th>时间</th><th>订单号</th>${showAccount ? '<th>账号</th>' : ''}<th>渠道</th><th>点数</th><th>金额</th><th>状态</th>
           </tr></thead>
           <tbody>
             ${rows.map((r) => `<tr>
               <td>${fmtTime(r.created_at)}</td>
               <td style="font-family:ui-monospace,monospace;font-size:12px;">${esc(r.out_trade_no)}</td>
               ${showAccount ? `<td>${esc(accountLabel(state.accounts.find((a) => a.id === r.account_id) || { id: r.account_id }))}</td>` : ''}
+              <td>${esc(channelName(r.channel || 'wxpay'))}</td>
               <td>${pointsText(r.points)}</td>
               <td>${money(r.amount_cents)}</td>
               <td>${statusBadge(r.status)}</td>
@@ -380,15 +398,22 @@ const RechargePage = (() => {
       setBanner('error', `<strong>支付通道状态获取失败</strong>：${esc(state.statusError || '请稍后重试')}`);
       return;
     }
-    if (st.enabled && st.ready) {
-      setBanner('ok', '<strong>微信扫码充值已开通</strong>：选档位 → 生成二维码 → 微信扫码支付，到账后余额自动刷新。');
+    const r = readiness();
+    if (r.canPay) {
+      const label = r.label || '在线支付';
+      const switchTip = (r.primary && r.channel && r.primary !== r.channel)
+        ? `（主通道${channelName(r.primary)}未就绪，已自动切到${label}）`
+        : '';
+      setBanner('ok', `<strong>${esc(label)}充值已开通</strong>：选档位 → 生成二维码 → 扫码支付，到账后余额自动刷新。${esc(switchTip)}`);
       return;
     }
+    const missingNames = (st.missing && st.missing.length) ? st.missing.join('、') : '';
     const adminHint = state.isAdmin
-      ? `可在右栏「人工充值」直接给账号加点数${st.missing && st.missing.length ? '；当前缺少配置：' + esc(st.missing.join('、')) : ''}。`
+      ? `可在右栏「人工充值」直接给账号加点数${missingNames ? '；当前缺少配置：' + esc(missingNames) : ''}。`
       : '需要充值时请联系管理员，由管理员在后台给你加点数（点数立即到账）。';
+    const primaryLabel = st.primary_channel ? channelName(st.primary_channel) : '在线支付';
     setBanner('warn',
-      '<div><strong>微信支付通道尚未开通</strong>，当前无法在线扫码充值。<br>' +
+      `<div><strong>${esc(primaryLabel)}通道尚未开通</strong>，当前无法在线扫码充值。<br>` +
       adminHint +
       '<br><span class="rc-muted">开通后本页无需改动：同一页面会直接出现二维码。</span></div>');
   }
@@ -522,22 +547,25 @@ const RechargePage = (() => {
   }
 
   async function createOrder() {
-    if (!canPay()) {
-      setBanner('warn', '<strong>微信支付通道尚未开通</strong>，暂时无法在线充值，请走人工充值。');
+    const ready = readiness();
+    if (!ready.canPay) {
+      setBanner('warn', '<strong>在线支付通道尚未开通</strong>，暂时无法在线充值，请走人工充值。');
       return;
     }
+    const channel = ready.channel || 'wxpay';
+    const channelText = channelName(channel);
     const points = Number(state.points || 0);
     if (!points) { Toast.show('请先选择充值档位', 'warning'); return; }
     const btn = document.getElementById('rcPayBtn');
     if (btn) { btn.disabled = true; btn.textContent = '生成中...'; }
     try {
-      const body = { points };
+      const body = { points, channel };
       if (state.isAdmin && state.accountId) body.account_id = state.accountId;
       const res = await API.post('/api/pay/orders', body);
       if (!res || res.code !== 200 || !res.data || !res.data.code_url) {
         const msg = (res && res.msg) || '下单失败';
         if (res && res.code === 503) {
-          setBanner('warn', '<strong>微信支付通道尚未开通</strong>：' + esc(msg) + '（请先走人工充值）');
+          setBanner('warn', `<strong>${esc(channelText)}支付通道尚未开通</strong>：` + esc(msg) + '（请先走人工充值）');
         } else if (res && res.code === 429) {
           Toast.show(msg, 'warning');
         } else {
@@ -550,7 +578,7 @@ const RechargePage = (() => {
       paintOrder();
       startCountdown(res.data.expires_in);
       schedulePoll();
-      setBanner('info', '二维码已生成：请用微信扫一扫支付，<b>15 分钟内有效</b>，支付后余额自动到账。');
+      setBanner('info', `二维码已生成：请用${esc(channelText)}扫一扫支付，<b>15 分钟内有效</b>，支付后余额自动到账。`);
     } finally {
       if (btn) { btn.disabled = !canPay(); btn.textContent = '生成充值二维码'; }
     }

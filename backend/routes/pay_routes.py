@@ -15,7 +15,7 @@ import os
 
 from flask import Blueprint, request
 
-from services import alipay_notify, pay_service, wxpay_service
+from services import alipay_notify, alipay_service, pay_service, wxpay_service
 from utils.auth import get_current_user
 from utils.response import error_response, handle_errors, success_response
 
@@ -41,33 +41,107 @@ def _is_admin(user):
     return (user.get('role') or '') == 'admin'
 
 
+# 渠道注册表：新增渠道只加一行 + 一个 config/missing_config 适配器
+CHANNEL_LABELS = {'wxpay': '微信扫码', 'alipay': '支付宝扫码'}
+CHANNEL_ORDER = ('wxpay', 'alipay')
+DEFAULT_PRIMARY_CHANNEL = 'alipay'      # 2026-11 起主通道为支付宝，微信保留可切回
+_LEGACY_CHANNEL_NAME = {'wxpay': 'wechat_native', 'alipay': 'alipay_qr'}
+
+
+def _channel_state(name):
+    """单个渠道的开关/就绪状态。missing 只给变量名，不含值。"""
+    if name == 'wxpay':
+        cfg = wxpay_service.config()
+        missing = wxpay_service.missing_config()
+        sandbox = False
+    else:
+        cfg = alipay_service.config()
+        missing = alipay_service.missing_config()
+        sandbox = bool(cfg.get('sandbox'))
+    return {
+        'label': CHANNEL_LABELS.get(name, name),
+        'enabled': bool(cfg.get('enabled')),
+        'ready': bool(cfg.get('enabled')) and not missing,
+        'missing': missing,
+        'notify_url': cfg.get('notify_url') or '',
+        'sandbox': sandbox,
+    }
+
+
+def _primary_channel(channels, env=None):
+    """配置的主通道；值非法或未配置时回落到默认主通道。"""
+    env = os.environ if env is None else env
+    raw = (env.get('PAY_PRIMARY_CHANNEL') or '').strip().lower()
+    if raw in channels:
+        return raw
+    if raw:
+        return DEFAULT_PRIMARY_CHANNEL      # 配了但不认识 → 回默认，并在 status 里体现
+    return DEFAULT_PRIMARY_CHANNEL
+
+
+def _active_channel(primary, channels):
+    """真正能用的渠道：主通道优先，否则取第一个就绪的；都不行返回 None。"""
+    if primary in channels and channels[primary]['ready']:
+        return primary
+    for name in CHANNEL_ORDER:
+        if name in channels and channels[name]['ready']:
+            return name
+    return None
+
+
 @pay_bp.route('/pay/status', methods=['GET'])
 @handle_errors
 def pay_status():
-    """支付开关 / 档位。管理员看到完整配置，业务员只看到「能否充值」。"""
+    """支付开关 / 档位 / 各渠道状态。管理员看完整配置，业务员只看到「能否充值」。"""
     user, err = _current_user_or_401()
     if err:
         return err
-    cfg = wxpay_service.config()
-    missing = wxpay_service.missing_config()
+
+    channels = {name: _channel_state(name) for name in CHANNEL_ORDER}
+    primary = _primary_channel(channels)
+    active = _active_channel(primary, channels)
+    is_admin = _is_admin(user)
+
+    # 对外只暴露「能不能用」，缺失项细节只给管理员
+    public_channels = {}
+    for name, state in channels.items():
+        item = {
+            'label': state['label'],
+            'enabled': state['enabled'],
+            'ready': state['ready'],
+            'missing_count': len(state['missing']),
+            'sandbox': state['sandbox'],
+        }
+        if is_admin:
+            item['missing'] = state['missing']
+            item['notify_url'] = state['notify_url']
+        public_channels[name] = item
+
     payload = {
-        'enabled': cfg['enabled'],
-        'ready': bool(cfg['enabled']) and not missing,
+        'primary_channel': primary,
+        'active_channel': active,           # 真正可用的渠道（主通道没开时自动落到备选）
+        'can_pay': active is not None,
+        'channels': public_channels,
+        'ready_channels': [n for n in CHANNEL_ORDER if channels[n]['ready']],
         'tiers': pay_service.tiers(),
         'order_ttl_minutes': pay_service.ORDER_TTL_MINUTES,
-        'channel': 'wechat_native',
+        # ---- 兼容旧前端/旧脚本：仍是「当前主通道」的开关与就绪态 ----
+        'enabled': channels[primary]['enabled'],
+        'ready': channels[primary]['ready'],
+        'channel': _LEGACY_CHANNEL_NAME.get(primary, primary),
+        'missing_count': len(channels[primary]['missing']),
     }
-    if not _is_admin(user):
-        # 业务员：不暴露回调地址/缺失项细节，只告诉「能不能充」和「缺几项」
-        payload['missing_count'] = len(missing)
+    if not is_admin:
+        # 业务员：不暴露回调地址/缺失项明细，只告诉「能不能充」和「缺几项」
         return success_response(payload)
+
     payload.update({
-        'missing': missing,
+        'missing': channels[primary]['missing'],
         'daily_cap_points': pay_service.daily_cap_points(),
         'orders_per_minute': pay_service.ORDERS_PER_MINUTE,
-        'callback_ip_mode': cfg['callback_ip_mode'],
-        'callback_ips_configured': len(cfg['callback_ips']),
-        'notify_url': cfg['notify_url'],
+        'callback_ip_mode': wxpay_service.config()['callback_ip_mode'],
+        'callback_ips_configured': len(wxpay_service.config()['callback_ips']),
+        'notify_url': channels[primary]['notify_url'],
     })
     return success_response(payload)
 
