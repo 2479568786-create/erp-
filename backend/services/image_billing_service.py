@@ -13,6 +13,7 @@
 - 历史已生图（改造上线前）不计入余额，余额从本功能上线后开始扣。
 """
 import math
+import os
 from datetime import date, datetime, timedelta
 
 from db import execute, query
@@ -403,6 +404,27 @@ def topup_logs(account_id=None, limit=100, include_adjustments=False):
     return [_row_dict(r) for r in rows]
 
 
+
+def initial_grants():
+    """初始额度映射（历史迁移直写进 accounts，没有任何流水行）。
+
+    来源：env `IMAGE_BILLING_INITIAL_GRANTS`，格式 `8:40,7:13`（account_id:点数）。
+    未配置返回空 dict，此时 `topup_summary()['initial_grant']` 为 None。
+    """
+    raw = (os.environ.get('IMAGE_BILLING_INITIAL_GRANTS') or '').strip()
+    out = {}
+    if not raw:
+        return out
+    for part in raw.split(','):
+        part = part.strip()
+        if not part or ':' not in part:
+            continue
+        key, value = part.split(':', 1)
+        try:
+            out[int(key.strip())] = float(value.strip())
+        except (TypeError, ValueError):
+            continue
+    return out
 def topup_summary(account_id=None):
     """全量汇总（SQL 聚合，**不受 list 的 limit 截断**）。
 
@@ -410,6 +432,9 @@ def topup_summary(account_id=None):
       仍只算 `balance_add`，语义不变；
     - `correction_points`：`billing_correction` 合计（如多扣退回、误覆盖补回）；
     - `adjustment_points`：`balance_set` 覆盖式调整合计（当前线上为 0）；
+    - `initial_grant`：该账号初始额度（历史迁移直写，来源 env `IMAGE_BILLING_INITIAL_GRANTS`；
+      未配置为 None），配合 `usage_points` / `balance_points` 自证
+      `initial_grant + total_points − usage_points = balance_points`；
     - `net_balance_delta` = 三者相加（充值净额 + 修正 + 覆盖调整），是**账面净变化**，
       **不等于余额差**：`billing_correction` 是否真的改了 accounts 余额取决于写入方式。
       线上 11.11 那两笔只有台账记录、没落到余额（等式 `初始额度 + 充值 − image_usage 累计 = 余额`
@@ -450,6 +475,13 @@ def topup_summary(account_id=None):
     else:
         bal = query('SELECT COALESCE(SUM(image_balance_cents), 0) AS b FROM accounts', one=True) or {}
 
+    grants = initial_grants()
+    if account_id is not None:
+        grant = grants.get(int(account_id))
+        grant = round(grant, 2) if grant is not None else None
+    else:
+        grant = round(sum(grants.values()), 2) if grants else None
+
     positive = int(row.get('p') or 0)
     reversal = int(row.get('r') or 0)
     correction = int(adj.get('c') or 0)
@@ -465,6 +497,7 @@ def topup_summary(account_id=None):
         'usage_points': round(float(use.get('p') or 0), 2),
         'usage_images': int(use.get('n') or 0),
         'balance_points': round(cents_to_points(int(bal.get('b') or 0)), 2),
+        'initial_grant': grant,
     }
 
 
