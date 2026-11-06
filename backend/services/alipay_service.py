@@ -10,8 +10,12 @@
 纪律：私钥/公钥只从文件路径读取，绝不写日志、不入库、不进仓库。缺项只报变量名，不返回值。
 """
 import base64
+import json
 import os
 import re
+import urllib.error
+import urllib.parse
+import urllib.request
 from decimal import Decimal, InvalidOperation
 
 from cryptography.hazmat.primitives import hashes, serialization
@@ -192,9 +196,9 @@ def cents_to_yuan(cents):
 
 # ---------------- 公共参数（A2 下单用） ----------------
 
-def build_common_params(method, biz_content, cfg=None, timestamp=None, notify_url=None):
+def build_common_params(method, biz_content, cfg=None, timestamp=None, notify_url=None,
+                        with_notify_url=True):
     """构造公共参数（不含 sign）。biz_content 传 dict，会被序列化为 JSON 字符串。"""
-    import json
     cfg = cfg or config()
     if timestamp is None:
         # 支付宝要求北京时间 yyyy-MM-dd HH:mm:ss
@@ -209,10 +213,115 @@ def build_common_params(method, biz_content, cfg=None, timestamp=None, notify_ur
         'timestamp': timestamp,
         'version': '1.0',
     }
-    if notify_url or cfg['notify_url']:
+    if with_notify_url and (notify_url or cfg['notify_url']):
         params['notify_url'] = notify_url or cfg['notify_url']
     if isinstance(biz_content, (dict, list)):
         params['biz_content'] = json.dumps(biz_content, ensure_ascii=False, separators=(',', ':'))
     elif biz_content:
         params['biz_content'] = biz_content
     return params
+
+
+# ---------------- 请求 / 响应 ----------------
+
+NOTIFY_METHODS = ('alipay.trade.precreate', 'alipay.trade.page.pay', 'alipay.trade.refund')
+MAX_RESPONSE_BYTES = 512 * 1024
+
+
+def _post_form(params, cfg, timeout=15):
+    """按支付宝网关要求 POST 表单（不要 JSON body）。"""
+    body = urllib.parse.urlencode(params).encode('utf-8')
+    req = urllib.request.Request(
+        cfg['gateway'], data=body, method='POST',
+        headers={'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8',
+                 'Accept': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read(MAX_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(MAX_RESPONSE_BYTES).decode('utf-8', 'replace')[:300]
+        raise RuntimeError('支付宝网关 HTTP %s：%s' % (exc.code, detail))
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise RuntimeError('支付宝响应过大')
+    return raw.decode('utf-8')
+
+
+def extract_response_node(raw, node_key):
+    """从原始响应里切出 `<node_key>` 对应的 JSON 子串。
+
+    支付宝的响应签名是**对这段原始子串**算的（不是整体 body、也不是重新序列化），
+    所以必须先按字节切出来再验，任何 json.dumps 再序列化都会验签失败。
+    """
+    idx = raw.find('"%s"' % node_key)
+    if idx < 0:
+        raise RuntimeError('响应缺少节点 %s' % node_key)
+    start = raw.find('{', idx)
+    if start < 0:
+        raise RuntimeError('响应节点不是对象')
+    depth = 0
+    in_str = False
+    escaped = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_str:
+            if escaped:
+                escaped = False
+            elif ch == '\\':
+                escaped = True
+            elif ch == '"':
+                in_str = False
+        else:
+            if ch == '"':
+                in_str = True
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return raw[start:i + 1]
+    raise RuntimeError('响应节点未闭合')
+
+
+def verify_response(raw, node_text, public_key=None, public_key_path=None):
+    """验支付宝**响应**签名（与回调一样用支付宝公钥，但待签内容=节点原始子串）。"""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise RuntimeError('响应不是合法 JSON')
+    signature = data.get('sign')
+    if not signature:
+        raise RuntimeError('响应缺少 sign')
+    key = public_key or _load_public_key(public_key_path or config()['public_key_path'])
+    key.verify(base64.b64decode(signature), node_text.encode('utf-8'),
+               padding.PKCS1v15(), hashes.SHA256())
+
+
+def parse_response(raw, node_key, public_key=None, public_key_path=None, verify=True):
+    """解析响应节点；verify=True 时先验签。返回节点 dict（含 code/msg/sub_code）。"""
+    node_text = extract_response_node(raw, node_key)
+    if verify:
+        verify_response(raw, node_text, public_key=public_key, public_key_path=public_key_path)
+    return json.loads(node_text)
+
+
+def request(method, biz_content, cfg=None, private_key=None, public_key=None,
+            http_post=None, notify_url=None, verify=True):
+    """发一次支付宝请求并返回响应节点 dict。http_post 可注入（单测用）。"""
+    cfg = cfg or config()
+    params = build_common_params(method, biz_content, cfg=cfg, notify_url=notify_url,
+                                 with_notify_url=(method in NOTIFY_METHODS))
+    params['sign'] = sign(params, private_key=private_key,
+                          private_key_path=cfg['private_key_path'])
+    raw = (http_post or _post_form)(params, cfg)
+    node_key = method.replace('.', '_') + '_response'
+    return parse_response(raw, node_key, public_key=public_key, verify=verify)
+
+
+def query_trade(out_trade_no, cfg=None, **kwargs):
+    """alipay.trade.query：按商户订单号查单（对账补偿用）。"""
+    return request('alipay.trade.query', {'out_trade_no': out_trade_no}, cfg=cfg, **kwargs)
+
+
+def close_trade(out_trade_no, cfg=None, **kwargs):
+    """alipay.trade.close：关单（为避免关掉已支付订单，调用前应先 query）。"""
+    return request('alipay.trade.close', {'out_trade_no': out_trade_no}, cfg=cfg, **kwargs)

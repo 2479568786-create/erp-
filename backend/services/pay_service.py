@@ -48,13 +48,32 @@ SCHEMA = (
         detail TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
     )""",
+    """CREATE TABLE IF NOT EXISTS pay_refunds (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        out_trade_no TEXT NOT NULL,
+        channel TEXT NOT NULL DEFAULT 'wxpay',
+        out_request_no TEXT NOT NULL UNIQUE,
+        amount_cents INTEGER NOT NULL,
+        reason TEXT,
+        status TEXT NOT NULL DEFAULT 'created',
+        trade_no TEXT,
+        refund_no TEXT,
+        notify_digest TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )""",
     "CREATE INDEX IF NOT EXISTS idx_pay_events_no ON pay_events(out_trade_no)",
     "CREATE INDEX IF NOT EXISTS idx_pay_orders_status ON pay_orders(status, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_pay_refunds_order ON pay_refunds(out_trade_no)",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_pay_orders_transaction ON pay_orders(transaction_id) "
     "WHERE transaction_id IS NOT NULL AND transaction_id != ''",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_pay_orders_notify_digest ON pay_orders(notify_digest) "
     "WHERE notify_digest IS NOT NULL AND notify_digest != ''",
 )
+
+# 建表语句 / 索引语句分开：索引必须等所有表都建完再建（pay_refunds 表在索引之前）
+TABLES = SCHEMA[:3]
+INDEXES = SCHEMA[3:]
 
 ADD_COLUMNS = (
     ('prepay_id', "ALTER TABLE pay_orders ADD COLUMN prepay_id TEXT"),
@@ -69,26 +88,26 @@ def ensure_tables(conn=None):
     """幂等建表 + 补列 + 建索引。"""
     global _table_ready
     if conn is not None:
-        for sql in SCHEMA[:2]:
+        for sql in TABLES:
             conn.execute(sql)
         cols = {row[1] for row in conn.execute("PRAGMA table_info(pay_orders)")}
         for name, ddl in ADD_COLUMNS:
             if name not in cols:
                 conn.execute(ddl)
-        for sql in SCHEMA[2:]:
+        for sql in INDEXES:
             conn.execute(sql)
         conn.commit()
         return
     if _table_ready:
         return
     from db import execute, query
-    for sql in SCHEMA[:2]:
+    for sql in TABLES:
         execute(sql)
     cols = {row['name'] for row in query("PRAGMA table_info(pay_orders)")}
     for name, ddl in ADD_COLUMNS:
         if name not in cols:
             execute(ddl)
-    for sql in SCHEMA[2:]:
+    for sql in INDEXES:
         execute(sql)
     _table_ready = True
 
@@ -350,6 +369,82 @@ def pending_credit(conn=None, limit=50):
                   (limit,), one=False) or []
 
 
+def stale_created(channel='alipay', older_than_seconds=120, limit=50, conn=None, now_ts=None):
+    """建单超过 N 秒仍是 created 的订单（回调可能丢），给对账脚本主动查单。"""
+    now_ts = now_ts if now_ts is not None else time.time()
+    cutoff = _utc_str(datetime.fromtimestamp(now_ts - older_than_seconds).astimezone())
+    return _fetch(conn,
+                  "SELECT * FROM pay_orders WHERE status = 'created' AND channel = ? "
+                  "AND created_at < ? ORDER BY created_at ASC LIMIT ?",
+                  (channel, cutoff, limit), one=False) or []
+
+
 def stats(conn=None):
     rows = _fetch(conn, "SELECT status, COUNT(*) AS c FROM pay_orders GROUP BY status", (), one=False) or []
     return {row['status']: row['c'] for row in rows}
+
+
+# ---------------- 退款（M3 占位：只落单与状态，不调渠道接口） ----------------
+
+REFUND_STATUSES = ('created', 'succeeded', 'failed')
+
+
+def new_out_request_no(now=None):
+    """退款幂等键（我方生成，渠道用它去重）：RF + 时间戳 + 6 位随机。"""
+    now = now or datetime.now()
+    suffix = ''.join(random.choice(string.digits) for _ in range(6))
+    return 'RF%s%s' % (now.strftime('%Y%m%d%H%M%S'), suffix)
+
+
+def create_refund(out_trade_no, amount_cents, reason='', channel=None,
+                  out_request_no=None, conn=None):
+    """登记一笔退款（占位）。真实退款调用在 M3 接入渠道退款接口。
+
+    校验：订单必须存在且已支付；退款金额 > 0 且不超过订单金额。
+    幂等：out_request_no 唯一，重复登记抛异常（唯一索引）。
+    """
+    order = get_order(out_trade_no, conn=conn)
+    if not order:
+        raise ValueError('订单不存在')
+    if order['status'] not in ('paid', 'credited'):
+        raise ValueError('订单未支付，不能退款：%s' % order['status'])
+    try:
+        amount = int(amount_cents)
+    except (TypeError, ValueError):
+        raise ValueError('退款金额不合法')
+    if amount <= 0:
+        raise ValueError('退款金额必须大于 0')
+    if amount > int(order['amount_cents']):
+        raise ValueError('退款金额超过订单金额')
+    out_request_no = (out_request_no or new_out_request_no()).strip()
+    if not out_request_no:
+        raise ValueError('退款幂等键不能为空')
+    _write(conn,
+           "INSERT INTO pay_refunds (out_trade_no, channel, out_request_no, amount_cents, reason, status) "
+           "VALUES (?, ?, ?, ?, ?, 'created')",
+           (out_trade_no, channel or order.get('channel') or 'wxpay',
+            out_request_no, amount, str(reason or '')[:200]))
+    log_event(out_trade_no, 'refund_created', out_request_no, conn=conn)
+    return get_refund(out_request_no, conn=conn)
+
+
+def get_refund(out_request_no, conn=None):
+    return _fetch(conn, "SELECT * FROM pay_refunds WHERE out_request_no = ?", (out_request_no,))
+
+
+def list_refunds(out_trade_no, conn=None):
+    return _fetch(conn,
+                  "SELECT * FROM pay_refunds WHERE out_trade_no = ? ORDER BY id DESC",
+                  (out_trade_no,), one=False) or []
+
+
+def mark_refund(out_request_no, status, refund_no=None, trade_no=None,
+                notify_digest=None, conn=None):
+    """更新退款状态（M3 由渠道退款回调/查单调用）。"""
+    if status not in REFUND_STATUSES:
+        raise ValueError('非法退款状态：%s' % status)
+    return _write(conn,
+                  "UPDATE pay_refunds SET status = ?, refund_no = COALESCE(?, refund_no), "
+                  "trade_no = COALESCE(?, trade_no), notify_digest = COALESCE(?, notify_digest), "
+                  "updated_at = datetime('now') WHERE out_request_no = ?",
+                  (status, refund_no, trade_no, notify_digest, out_request_no))
