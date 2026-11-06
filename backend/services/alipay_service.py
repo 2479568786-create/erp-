@@ -143,9 +143,11 @@ def verify_notify(params, public_key=None, public_key_path=None):
         raw_sig = base64.b64decode(signature, validate=True)
     except Exception:  # noqa: BLE001
         return False, 'bad_sign_encoding'
+    # 公钥加载失败属于「我方配置错」，必须抛出去让上层回 503 并告警，
+    # 不能混成「签名不合法」（否则运维会以为是被伪造攻击，掩盖真正的缺钥匙问题）。
+    key = public_key or _load_public_key(
+        public_key_path or config()['public_key_path'])
     try:
-        key = public_key or _load_public_key(
-            public_key_path or config()['public_key_path'])
         key.verify(raw_sig, text.encode('utf-8'), padding.PKCS1v15(), hashes.SHA256())
     except Exception as exc:  # noqa: BLE001
         return False, 'bad_signature:%s' % type(exc).__name__

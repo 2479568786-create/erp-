@@ -6,6 +6,7 @@
 - POST /api/pay/orders/<out_trade_no>/close    关单
 - POST /api/pay/orders/<out_trade_no>/refund   退款（占位，501）
 - POST /api/payment/wechat/callback           微信回调（唯一入口，无鉴权靠验签）
+- POST /api/pay/alipay/notify                  支付宝异步通知（唯一入口，无鉴权靠验签，应答纯文本 success/fail）
 
 口径：1 点 = 1 元 = 100 分；档位来自 WECHATPAY_TIERS；业务员只能给自己充，管理员可代充。
 """
@@ -14,7 +15,7 @@ import os
 
 from flask import Blueprint, request
 
-from services import pay_service, wxpay_service
+from services import alipay_notify, pay_service, wxpay_service
 from utils.auth import get_current_user
 from utils.response import error_response, handle_errors, success_response
 
@@ -278,3 +279,21 @@ def wxpay_callback():
     result = pay_service.credit_order(out_trade_no)
     pay_service.log_event(out_trade_no, 'notify_ok', 'credit=%s' % result.get('reason'))
     return json.dumps(SUCCESS), 200, {'Content-Type': 'application/json'}
+
+
+@pay_bp.route('/pay/alipay/notify', methods=['POST'])
+def alipay_notify_callback():
+    """支付宝异步通知（唯一入口）。
+
+    应答必须是**纯文本** `success` / `fail`（返回 JSON 会被支付宝判定失败并重试 25 小时）。
+    验签失败 → 401 fail；业务异常 → 200 success（避免无限重试，异常落 pay_events 供对账）。
+    """
+    raw = request.get_data() or b''
+    if len(raw) > MAX_BODY:
+        pay_service.log_event('-', 'alipay_notify_too_large', 'bytes=%d' % len(raw))
+        return alipay_notify.FAIL_TEXT, 413, {'Content-Type': 'text/plain; charset=utf-8'}
+
+    form = request.form.to_dict(flat=True)
+    digest = pay_service.digest_of(raw)
+    status, body, info = alipay_notify.handle_notify(form, digest)
+    return body, status, {'Content-Type': 'text/plain; charset=utf-8'}

@@ -17,6 +17,8 @@ from datetime import datetime, timedelta, timezone
 DEFAULT_TIERS = (10, 30, 50, 100, 200)
 ORDER_TTL_MINUTES = 15
 ORDERS_PER_MINUTE = 3
+# 入账流水里的渠道名（operator 前缀与文案都按 channel 区分，避免支付宝订单被记成微信）
+CHANNEL_LABELS = {'wxpay': '微信支付', 'alipay': '支付宝'}
 
 SCHEMA = (
     """CREATE TABLE IF NOT EXISTS pay_orders (
@@ -216,11 +218,14 @@ def daily_points(account_id, conn=None, day=None):
     return float(row['p'] if row else 0)
 
 
-def create_order(out_trade_no, account_id, operator_id, points, amount_cents, conn=None):
+def create_order(out_trade_no, account_id, operator_id, points, amount_cents, conn=None,
+                 channel='wxpay'):
+    """建单。channel 决定后续用哪个渠道适配器（wxpay / alipay），默认 wxpay 保持兼容。"""
+    channel = (channel or 'wxpay').strip() or 'wxpay'
     _write(conn,
            "INSERT INTO pay_orders (out_trade_no, channel, account_id, operator_id, amount_cents, points, status) "
-           "VALUES (?, 'wxpay', ?, ?, ?, ?, 'created')",
-           (out_trade_no, account_id, operator_id, int(amount_cents), float(points)))
+           "VALUES (?, ?, ?, ?, ?, ?, 'created')",
+           (out_trade_no, channel, account_id, operator_id, int(amount_cents), float(points)))
     return get_order(out_trade_no, conn=conn)
 
 
@@ -312,10 +317,12 @@ def credit_order(out_trade_no, conn=None, adjust=None):
     if adjust is None:
         from services import image_billing_service as billing
         adjust = billing.adjust_balance
+    channel = (order.get('channel') or 'wxpay')
+    label = CHANNEL_LABELS.get(channel, channel)
     try:
         adjust(order['account_id'], points=order['points'], mode='add',
-               reason='微信支付充值 %s 元' % (order['amount_cents'] / 100.0),
-               operator='wxpay:%s' % out_trade_no)
+               reason='%s充值 %s 元' % (label, order['amount_cents'] / 100.0),
+               operator='%s:%s' % (channel, out_trade_no))
     except Exception as exc:  # noqa: BLE001
         _write(conn,
                "UPDATE pay_orders SET status = 'paid', credited_at = NULL, updated_at = datetime('now') "
