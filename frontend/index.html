@@ -874,8 +874,19 @@
 <script src="js/pages/finance-center.js?v=20261104-ui2"></script>
 <script src="assets/qrcode.min.js?v=20261106a"></script>
 <script src="js/pay-ready.js?v=20261106a"></script>
-<script src="js/pages/recharge.js?v=20261106d"></script>
+<script src="js/pages/recharge.js?v=20261107a"></script>
 <!-- 应用入口 -->
+<script>
+/* 支付宝电脑网站支付 return_url 回跳：参数在 ? 里，# 后面的查询会被 hash 路由吃掉 */
+(function () {
+  try {
+    var q = new URLSearchParams(window.location.search || '');
+    if (q.has('alipay')) {
+      window.history.replaceState(null, '', window.location.pathname + '#/recharge?alipay=return');
+    }
+  } catch (e) { /* 老浏览器忽略 */ }
+})();
+</script>
 <script src="js/app.js"></script>
 
 </body>

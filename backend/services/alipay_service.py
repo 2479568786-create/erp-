@@ -10,6 +10,7 @@
 纪律：私钥/公钥只从文件路径读取，绝不写日志、不入库、不进仓库。缺项只报变量名，不返回值。
 """
 import base64
+import html
 import json
 import os
 import re
@@ -78,6 +79,7 @@ def config():
         'public_key_path': _env('ALIPAY_PUBLIC_KEY_PATH')
                            or os.path.join(key_dir, 'alipay_public_key.pem'),
         'notify_url': _env('ALIPAY_NOTIFY_URL'),
+        'return_url': _env('ALIPAY_RETURN_URL'),
         'refund_notify_url': _env('ALIPAY_REFUND_NOTIFY_URL'),
         'gateway': gateway,
         'seller_id': _env('ALIPAY_SELLER_ID'),
@@ -386,3 +388,57 @@ def precreate(out_trade_no, amount_cents, subject='Geekfast ERP 图片点数充�
     if not str(node.get('qr_code') or '').strip():
         raise AlipayError('预下单成功但未返回 qr_code')
     return node
+
+
+# ---------------- 电脑网站支付（alipay.trade.page.pay，A6 主通道） ----------------
+
+PAGE_PAY_METHOD = 'alipay.trade.page.pay'
+PAGE_PAY_PRODUCT_CODE = 'FAST_INSTANT_TRADE_PAY'
+DEFAULT_RETURN_URL = 'https://tugeekfast.xin/?alipay=return'
+
+
+def build_page_pay_params(out_trade_no, subject, amount_cents, cfg=None, private_key=None,
+                          timestamp=None, return_url=None, timeout_express='15m'):
+    """构造「电脑网站支付」的**已签名**参数（不含表单壳）。
+
+    金额用 `cents_to_yuan` 转元字符串（严格两位小数）；`timeout_express` 与本地
+    订单 TTL 对齐，避免支付宝侧仍在付、本地已过期关单。
+    """
+    cfg = cfg or config()
+    biz = {
+        'out_trade_no': out_trade_no,
+        'total_amount': cents_to_yuan(amount_cents),
+        'subject': (subject or 'Geekfast ERP 充值')[:256],
+        'product_code': PAGE_PAY_PRODUCT_CODE,
+        'timeout_express': timeout_express,
+    }
+    params = build_common_params(PAGE_PAY_METHOD, biz, cfg=cfg, timestamp=timestamp)
+    params['return_url'] = (return_url or cfg.get('return_url') or DEFAULT_RETURN_URL)
+    params['sign'] = sign(params, private_key=private_key,
+                          private_key_path=cfg['private_key_path'])
+    return params
+
+
+def build_page_pay_form(params, cfg=None):
+    """把已签名参数渲染成自提交表单 HTML（前端插入 DOM 后 submit 即跳支付宝）。"""
+    cfg = cfg or config()
+    fields = []
+    for key in sorted(params):
+        value = params[key]
+        if value is None or value == '':
+            continue
+        fields.append('<input type="hidden" name="%s" value="%s" />'
+                      % (html.escape(str(key), quote=True), html.escape(str(value), quote=True)))
+    return ('<form id="alipay-submit" name="alipaysubmit" method="post" accept-charset="utf-8"'
+            ' action="%s">\n%s\n</form>'
+            % (html.escape(cfg['gateway'], quote=True), '\n'.join(fields)))
+
+
+def page_pay(out_trade_no, subject, amount_cents, cfg=None, private_key=None,
+             timestamp=None, return_url=None, timeout_express='15m'):
+    """返回 {'pay_form': html, 'params': dict}（params 便于单测/排障，不含私钥）。"""
+    cfg = cfg or config()
+    params = build_page_pay_params(out_trade_no, subject, amount_cents, cfg=cfg,
+                                   private_key=private_key, timestamp=timestamp,
+                                   return_url=return_url, timeout_express=timeout_express)
+    return {'pay_form': build_page_pay_form(params, cfg=cfg), 'params': params}

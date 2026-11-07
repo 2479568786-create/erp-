@@ -462,7 +462,43 @@ const RechargePage = (() => {
     set('rcOrderAccount', accountLabel(activeAccount()));
     const st = document.getElementById('rcOrderStatus');
     if (st) st.innerHTML = o.status_text || statusBadge(o.status);
-    if (o.code_url) drawQr(o.code_url);
+    if (o.pay_form) {
+      renderPayButton(o);
+    } else if (o.code_url) {
+      drawQr(o.code_url);
+    }
+  }
+
+  /* 电脑网站支付（支付宝 page.pay）：服务端给的是自提交表单 HTML，点按钮时插入并 submit */
+  function renderPayButton(o) {
+    const box = document.getElementById('rcQrTarget');
+    if (!box) return;
+    box.innerHTML = '';
+    box.style.width = '100%';
+    box.style.height = 'auto';
+    box.style.border = '0';
+    box.style.padding = '0';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn-primary';
+    btn.style.cssText = 'width:100%;height:46px;font-size:15px;font-weight:600;';
+    btn.textContent = '去支付宝支付';
+    btn.addEventListener('click', () => submitPayForm(o.pay_form));
+    box.appendChild(btn);
+    const hint = document.createElement('div');
+    hint.style.cssText = 'font-size:12px;color:#667085;margin-top:10px;line-height:1.7;';
+    hint.textContent = '点击后在支付宝页面完成付款；付款成功回到本页，余额会自动刷新（以支付宝异步通知为准）。';
+    box.appendChild(hint);
+  }
+
+  function submitPayForm(htmlText) {
+    if (!htmlText) return;
+    const holder = document.createElement('div');
+    holder.style.display = 'none';
+    holder.innerHTML = htmlText;
+    document.body.appendChild(holder);
+    const form = holder.querySelector('form');
+    if (form) form.submit();
   }
 
   function drawQr(codeUrl) {
@@ -562,7 +598,8 @@ const RechargePage = (() => {
       const body = { points, channel };
       if (state.isAdmin && state.accountId) body.account_id = state.accountId;
       const res = await API.post('/api/pay/orders', body);
-      if (!res || res.code !== 200 || !res.data || !res.data.code_url) {
+      const hasPayForm = !!(res && res.data && res.data.pay_form);
+      if (!res || res.code !== 200 || !res.data || (!res.data.code_url && !hasPayForm)) {
         const msg = (res && res.msg) || '下单失败';
         if (res && res.code === 503) {
           setBanner('warn', `<strong>${esc(channelText)}支付通道尚未开通</strong>：` + esc(msg) + '（请先走人工充值）');
@@ -578,7 +615,11 @@ const RechargePage = (() => {
       paintOrder();
       startCountdown(res.data.expires_in);
       schedulePoll();
-      setBanner('info', `二维码已生成：请用${esc(channelText)}扫一扫支付，<b>15 分钟内有效</b>，支付后余额自动到账。`);
+      if (res.data.pay_form) {
+        setBanner('info', `<b>${esc(channelText)}支付页已就绪</b>：点右侧「去支付宝支付」完成付款，<b>15 分钟内有效</b>，支付后余额自动到账。`);
+      } else {
+        setBanner('info', `二维码已生成：请用${esc(channelText)}扫一扫支付，<b>15 分钟内有效</b>，支付后余额自动到账。`);
+      }
     } finally {
       if (btn) { btn.disabled = !canPay(); btn.textContent = '生成充值二维码'; }
     }
@@ -690,6 +731,12 @@ const RechargePage = (() => {
     renderTiers();
     renderBalance();
     renderAdminVisibility();
+    try {
+      const q = (Router && Router.currentRoute && Router.currentRoute.query) || {};
+      if (q.alipay === 'return') {
+        setBanner('info', '<strong>已从支付宝返回</strong>：到账以支付宝异步通知为准，通常几秒内完成；若余额未变，请稍等片刻后刷新（回跳参数不作为到账凭证）。');
+      }
+    } catch (e) { /* 忽略 */ }
     // 曾在本页发起、仍在 pending 的订单：不自动恢复（刷新后一律以 15 分钟过期为准）
     state.loaded = true;
   }

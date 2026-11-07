@@ -194,14 +194,27 @@ def create_order():
     out_trade_no = pay_service.new_out_trade_no()
     pay_service.create_order(out_trade_no, account_id, int(user['id']), points, points * 100,
                              channel=channel)
+    pay_form = ''
+    pay_mode = 'qrcode'
+    timeout_express = '%dm' % pay_service.ORDER_TTL_MINUTES
+    subject = 'Geekfast ERP 图片点数充值 %s 点' % points
     try:
         if channel == 'alipay':
-            resp = alipay_service.precreate(
-                out_trade_no, points * 100,
-                subject='Geekfast ERP 图片点数充值 %s 点' % points,
-                timeout_express='%dm' % pay_service.ORDER_TTL_MINUTES)
-            code_url = (resp.get('qr_code') or '').strip()
-            prepay_id = None
+            # 当面付 precreate 保留但不作为默认：ALIPAY_PAY_MODE=precreate 才走
+            pay_mode = (os.environ.get('ALIPAY_PAY_MODE') or 'page').strip().lower()
+            if pay_mode == 'precreate':
+                resp = alipay_service.precreate(
+                    out_trade_no, points * 100, subject=subject, timeout_express=timeout_express)
+                code_url = (resp.get('qr_code') or '').strip()
+                prepay_id = None
+                pay_mode = 'qrcode'
+            else:
+                pay_mode = 'page'
+                built = alipay_service.page_pay(
+                    out_trade_no, subject, points * 100, timeout_express=timeout_express)
+                pay_form = built.get('pay_form') or ''
+                code_url = ''
+                prepay_id = None
         else:
             resp = wxpay_service.create_native_order(
                 out_trade_no, 'Geekfast ERP 图片点数充值 %s 点' % points, points * 100)
@@ -221,22 +234,28 @@ def create_order():
         pay_service.log_event(out_trade_no, 'create_fail', str(exc)[:300])
         return error_response('%s下单失败：%s' % (channel_label, str(exc)[:160]), 502)
 
-    if not code_url:
+    if not code_url and not pay_form:
         pay_service.close_order(out_trade_no)
-        return error_response('%s未返回二维码' % channel_label, 502)
-    pay_service.set_code_url(out_trade_no, code_url, prepay_id)
+        return error_response('%s未返回支付凭证' % channel_label, 502)
+    if code_url:
+        pay_service.set_code_url(out_trade_no, code_url, prepay_id)
     pay_service.log_event(out_trade_no, 'create',
-                          'points=%s account=%s channel=%s' % (points, account_id, channel))
-    return success_response({
+                          'points=%s account=%s channel=%s mode=%s'
+                          % (points, account_id, channel, pay_mode))
+    payload = {
         'out_trade_no': out_trade_no,
         'code_url': code_url,
+        'pay_form': pay_form,          # 电脑网站支付：前端插入表单并 submit
+        'pay_mode': pay_mode,          # page / qrcode
         'channel': channel,
         'channel_label': channel_label,
         'points': points,
         'amount_cents': points * 100,
         'account_id': account_id,
         'expires_in': pay_service.ORDER_TTL_MINUTES * 60,
-    }, msg='订单已创建，请扫码支付')
+    }
+    return success_response(
+        payload, msg='订单已创建，请前往支付宝支付' if pay_mode == 'page' else '订单已创建，请扫码支付')
 
 
 @pay_bp.route('/pay/orders', methods=['GET'])
