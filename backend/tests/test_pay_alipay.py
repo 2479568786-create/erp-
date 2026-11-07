@@ -2,7 +2,7 @@
 """A1：支付宝 RSA2 签名 / 异步通知验签 / 金额换算单测。
 
 固定向量来源：本地一次性 RSA-2048 测试密钥对生成签名后，**用 OpenSSL 3.0.12 独立复核**：
-  原始 320 字节待签串 → `Verified OK`；把 `app_id=2021…` 改成 `2022…` → `Verification failure`。
+  原始 335 字节待签串 → `Verified OK`；把 `app_id=2021…` 改成 `2022…` → `Verification failure`。
 所以本文件里的期望签名不是「自己验自己」，而是外部工具确认过的真值。
 
 密钥是一次性测试密钥（明文泄露无害，**绝不可用于生产**），以 base64 存放以避免密钥扫描误报。
@@ -28,8 +28,8 @@ TEST_PRIVATE_PKCS8_B64 = "LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0tCk1JSUV2UUlCQURBTk
 TEST_PUBLIC_B64 = "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUFyZVRJMERoY3NhRCtqQTdmUjJvcQp1dVVtVm0vcWpLSDZRTU5RNkk5dTZGZmc0S0dqOWZoV200VzEwUGZhUlpEa2xtUzlUQnFCM0FHRHlHd3RuVFVlCkJ4dDBtY1Z6a3JBVFpBaUUvNFNxNDAvQkcxL2MvalZYOXowVlhyNFZUQzFuMTlWUDc2TEsyc2dmdmVOVEMvNFQKNzJtdGpGaGN5RXp2cUUxSG5rOWVBVCs2RXdJRFJDaWlrZkJVektWenlWd3VUblNHV1E5ZE5nQ0t5aEhNckxvSwpwK01UUDl4cDlmd3JjbVFmWVhSRlJJYmNRR1lEQlkzWWdiVEdBZzZRNWVmVTVqdmVCY0NoOUJNUnVMZi9HQ3lvCm91U01qbVZKaXMyNkpDcmlIWGdpRWFHZk1Za292aEVxOXZBUEcxc2JPZndzT2Z4NUxlNVd6eGRwbThyT1kwd2wKNndJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg=="
 
 VECTOR_PARAMS = {'app_id': '2021000000000001', 'method': 'alipay.trade.precreate', 'format': 'JSON', 'charset': 'utf-8', 'sign_type': 'RSA2', 'timestamp': '2026-11-06 12:00:00', 'version': '1.0', 'notify_url': 'https://example.test/api/pay/alipay/notify', 'biz_content': '{"out_trade_no":"RC20261106120000000001","total_amount":"10.00","subject":"Geekfast ERP recharge 10 points","timeout_express":"15m"}'}
-VECTOR_SIGN_STRING = "app_id=2021000000000001&biz_content={\"out_trade_no\":\"RC20261106120000000001\",\"total_amount\":\"10.00\",\"subject\":\"Geekfast ERP recharge 10 points\",\"timeout_express\":\"15m\"}&charset=utf-8&format=JSON&method=alipay.trade.precreate&notify_url=https://example.test/api/pay/alipay/notify&timestamp=2026-11-06 12:00:00&version=1.0"
-VECTOR_SIGN_B64 = "SPhPa2xlYseNydJOcBYB0Q1BuZ2NFL6lVgi8hlPpSbrnB2Gw/kw6Ke359YUEbc5AKo4+GQeZwNXBt2uFmMJ5XKFTCouGiN9oI5L4DZ7LHepLfjXQYuqvvnnmwmbpH0tNVtQ+k7+tsIS0vtTNUhEeucKeliqm68/3pWxw060Oz7SskMYsDK3CUbv30epHNwEycFqIaUB5nQ3QiUCpirqvs00GWRpdcSLdj8+3yJabkRMUV1hKMmAtAn9f4GCOk855Kur+UAs1V6ELD54/6mBYIoiVOaSlFEKH77SRCGs6RrrTktM+Lcjd3v2jNJh1fofRHibyQwj8K4W+K+0jxXnfvA=="
+VECTOR_SIGN_STRING = "app_id=2021000000000001&biz_content={\"out_trade_no\":\"RC20261106120000000001\",\"total_amount\":\"10.00\",\"subject\":\"Geekfast ERP recharge 10 points\",\"timeout_express\":\"15m\"}&charset=utf-8&format=JSON&method=alipay.trade.precreate&notify_url=https://example.test/api/pay/alipay/notify&sign_type=RSA2&timestamp=2026-11-06 12:00:00&version=1.0"
+VECTOR_SIGN_B64 = "JYjhWlLCvJfos8+KquN/c6KWQv0o+yZ0gEja4wLTSual56a21dEDSsOXx+ZHdPYR+iIokA2MSsx6bwjwNJR5rXNZcdtV7ebQ52U1NtbdZLvtdGnjkOXiQ1T2xUrNmVdi0hj72dhe9XaEtgVs6m4jcvXgH3+LBfiPk61SnG1OoJlNXqQrsKU15U6QmNsFv10tZ/MPlfuHDAGnfhM0SIYBCLpOF4sQTxcHLTawl+GlEvYy7knScQ1L2H8UElXx0pX3RMPnJ/RJcrGioOwYMD4EWBQVa5cBorENamPKImrK4xSuPR360tg5fWFAqtz68IPWDl9wOSy1h0GUPGtHzWJjiQ=="
 
 
 def _priv(pkcs8=False):
@@ -44,7 +44,7 @@ def _pub():
 class SignVectorTests(unittest.TestCase):
     def test_sign_string_matches_openssl_verified_vector(self):
         self.assertEqual(alipay_service.sign_string(VECTOR_PARAMS), VECTOR_SIGN_STRING)
-        self.assertEqual(len(VECTOR_SIGN_STRING.encode('utf-8')), 320)
+        self.assertEqual(len(VECTOR_SIGN_STRING.encode('utf-8')), 335)
 
     def test_sign_matches_fixed_vector(self):
         self.assertEqual(alipay_service.sign(VECTOR_PARAMS, private_key=_priv()), VECTOR_SIGN_B64)
@@ -55,7 +55,10 @@ class SignVectorTests(unittest.TestCase):
 
     def test_sign_string_excludes_sign_fields_and_empty_values(self):
         params = {'c': '3', 'a': '1', 'b': '', 'sign': 'x', 'sign_type': 'RSA2', 'd': None}
-        self.assertEqual(alipay_service.sign_string(params), 'a=1&c=3')
+        # 2026-11-07 实证：调网关时 sign_type 参与待签串（网关报错里打出来的就是含 sign_type 的串）
+        self.assertEqual(alipay_service.sign_string(params), 'a=1&c=3&sign_type=RSA2')
+        # 异步通知口径剔除 sign_type
+        self.assertEqual(alipay_service.sign_string(params, 'notify'), 'a=1&c=3')
 
     def test_sign_string_keeps_biz_content_verbatim(self):
         biz = '{"out_trade_no":"RC1","total_amount":"10.00"}'

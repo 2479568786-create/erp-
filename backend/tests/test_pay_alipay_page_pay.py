@@ -84,7 +84,8 @@ class PagePayTests(unittest.TestCase):
         p = dict(self._params())
         signature = p.pop('sign')
         text = alipay_service.sign_string(p)
-        self.assertNotIn('sign_type=', text.split('&')[0] + '&')  # sign_type 不参与待签串
+        # 2026-11-07 实证：调网关（含 page.pay）时 sign_type 参与待签串
+        self.assertIn('sign_type=RSA2', text)
         self.public.verify(base64.b64decode(signature), text.encode('utf-8'),
                            padding.PKCS1v15(), hashes.SHA256())
 

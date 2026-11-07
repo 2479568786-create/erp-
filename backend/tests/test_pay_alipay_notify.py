@@ -77,7 +77,7 @@ class Base(unittest.TestCase):
             'sign_type': 'RSA2',
         }
         form.update(over)
-        form['sign'] = alipay_service.sign(form, private_key=_priv())
+        form['sign'] = alipay_service.sign(form, private_key=_priv(), mode='notify')
         return form
 
     def _digest(self, form):

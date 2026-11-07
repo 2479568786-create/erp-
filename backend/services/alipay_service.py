@@ -116,10 +116,23 @@ def missing_config(env=None):
 
 # ---------------- 签名 / 验签 ----------------
 
-def sign_string(params):
-    """支付宝待签串：剔除 sign/sign_type，非空值按 key 升序，拼 k=v&k=v（原始值）。"""
+# 待签串的两种口径（2026-11-07 用真实网关报错实证修正）：
+#   request（调网关：query/precreate/page.pay…）：只剔除 sign，**sign_type 参与签名**
+#       —— 依据：网关 isv.invalid-signature 报错里打出的待签串含 `sign_type=RSA2`；
+#   notify（异步通知验签）：剔除 sign 与 sign_type（官方异步通知文档口径）。
+# 之前把两种都按 notify 口径处理，导致所有请求签名被拒。
+SIGN_EXCLUDE = {'request': ('sign',), 'notify': ('sign', 'sign_type')}
+
+
+def sign_string(params, mode='request'):
+    """待签串：按 key 升序拼 k=v&k=v（原始值，空值不参与）。
+
+    mode='request'（默认）：只剔除 sign（sign_type 参与）；
+    mode='notify'：剔除 sign 与 sign_type。
+    """
+    exclude = SIGN_EXCLUDE.get(mode, SIGN_EXCLUDE['request'])
     items = [(k, v) for k, v in params.items()
-             if k not in SIGN_EXCLUDE and v is not None and v != '']
+             if k not in exclude and v is not None and v != '']
     items.sort(key=lambda kv: kv[0])
     return '&'.join('%s=%s' % (k, v) for k, v in items)
 
@@ -142,12 +155,13 @@ def _load_public_key(path):
     return key
 
 
-def sign(params, private_key=None, private_key_path=None):
+def sign(params, private_key=None, private_key_path=None, mode='request'):
     """对参数签名，返回 base64 字符串（RSA2 = SHA256withRSA，PKCS#1 v1.5）。
 
     可传入已加载的 private_key（单测用），否则按 path 加载。
+    mode 见 SIGN_EXCLUDE：调网关用 request（含 sign_type），构造通知样例用 notify。
     """
-    text = sign_string(params)
+    text = sign_string(params, mode)
     key = private_key or _load_private_key(
         private_key_path or config()['private_key_path'])
     signature = key.sign(text.encode('utf-8'), padding.PKCS1v15(), hashes.SHA256())
@@ -158,18 +172,20 @@ def verify_notify(params, public_key=None, public_key_path=None):
     """校验支付宝异步通知。返回 (ok, reason)。
 
     params 应是回调表单的全部字段（含 sign、sign_type）。失败原因只给短标签，便于记事件。
+    兼容两种口径：先按异步通知规则（剔除 sign_type）验，失败再按请求口径（含 sign_type）验一次，
+    两种都不通过才算签名非法——避免因为 sign_type 口径差异把真实通知误杀。
     """
     if not params:
         return False, 'empty_params'
     fields = dict(params)
     signature = (fields.pop('sign', '') or '').strip()
-    sign_type = (fields.pop('sign_type', 'RSA2') or 'RSA2').strip().upper()
+    # sign_type 不 pop：兼容两种口径时要能还原「含 sign_type」的待签串
+    sign_type = (str(fields.get('sign_type') or 'RSA2')).strip().upper()
     if not signature:
         return False, 'missing_sign'
     if sign_type not in SUPPORTED_SIGN_TYPES:
         return False, 'bad_sign_type:%s' % sign_type
 
-    text = sign_string(fields)
     try:
         raw_sig = base64.b64decode(signature, validate=True)
     except Exception:  # noqa: BLE001
@@ -178,11 +194,16 @@ def verify_notify(params, public_key=None, public_key_path=None):
     # 不能混成「签名不合法」（否则运维会以为是被伪造攻击，掩盖真正的缺钥匙问题）。
     key = public_key or _load_public_key(
         public_key_path or config()['public_key_path'])
-    try:
-        key.verify(raw_sig, text.encode('utf-8'), padding.PKCS1v15(), hashes.SHA256())
-    except Exception as exc:  # noqa: BLE001
-        return False, 'bad_signature:%s' % type(exc).__name__
-    return True, 'ok'
+
+    reason = 'bad_signature:InvalidSignature'
+    for mode in ('notify', 'request'):
+        text = sign_string(fields, mode)
+        try:
+            key.verify(raw_sig, text.encode('utf-8'), padding.PKCS1v15(), hashes.SHA256())
+            return True, 'ok'
+        except Exception as exc:  # noqa: BLE001
+            reason = 'bad_signature:%s' % type(exc).__name__
+    return False, reason
 
 
 # ---------------- 金额 ----------------
