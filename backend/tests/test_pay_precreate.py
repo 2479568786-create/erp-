@@ -173,11 +173,12 @@ class CreateOrderRouteTests(unittest.TestCase):
         pay_service._table_ready = self._prev_ready
         self._db_patch.stop()
 
-    def _post(self, body, user=None, wx_cfg=None, wx_missing=None):
+    def _post(self, body, user=None, wx_cfg=None, wx_missing=None, pay_mode='precreate'):
         user = user or {'id': 8, 'role': 'salesperson'}
         wx_cfg = wx_cfg if wx_cfg is not None else self._wx_cfg
         wx_missing = wx_missing if wx_missing is not None else ['WECHATPAY_APPID']
-        with patch.object(pay_routes, 'get_current_user', return_value=user), \
+        with patch.dict(os.environ, {'ALIPAY_PAY_MODE': pay_mode}), \
+             patch.object(pay_routes, 'get_current_user', return_value=user), \
              patch.object(alipay_service, 'config', return_value=self._ali_cfg), \
              patch.object(alipay_service, 'missing_config', return_value=[]), \
              patch.object(wxpay_service, 'config', return_value=wx_cfg), \
@@ -233,7 +234,7 @@ class CreateOrderRouteTests(unittest.TestCase):
         cfg = dict(self._ali_cfg, enabled=False)
         with patch.object(alipay_service, 'config', return_value=cfg):
             with patch.object(pay_routes, '_channel_state',
-                              return_value={'label': '支付宝扫码', 'enabled': False,
+                              return_value={'label': '支付宝（电脑网站支付）', 'enabled': False,
                                             'ready': False, 'missing': ['ALIPAY_APPID'],
                                             'notify_url': '', 'sandbox': False}):
                 res = self._post({'points': 10, 'channel': 'alipay'})
@@ -263,6 +264,22 @@ class CreateOrderRouteTests(unittest.TestCase):
             res = self._post({'points': 10})     # 不传 channel
         self.assertEqual(res.status_code, 200, res.get_json())
         self.assertEqual(res.get_json()['data']['channel'], 'alipay')
+
+    def test_alipay_page_pay_returns_form(self):
+        """默认（非 precreate）走电脑网站支付：返回 pay_form、不返回 code_url。"""
+        form = ('<form id="alipay-submit" name="alipaysubmit" method="post"'
+                ' action="https://openapi.alipay.com/gateway.do"></form>')
+        with patch.object(alipay_service, 'page_pay', return_value={'pay_form': form}):
+            res = self._post({'points': 10, 'channel': 'alipay'}, pay_mode='page')
+        self.assertEqual(res.status_code, 200, res.get_json())
+        data = res.get_json()['data']
+        self.assertEqual('page', data['pay_mode'])
+        self.assertEqual(form, data['pay_form'])
+        self.assertEqual('', data['code_url'])
+        order = self._order(data['out_trade_no'])
+        self.assertEqual('alipay', order['channel'])
+        self.assertEqual('created', order['status'])
+        self.assertEqual(1000, order['amount_cents'])
 
 
 if __name__ == '__main__':

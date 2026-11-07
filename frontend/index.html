@@ -882,7 +882,9 @@
   try {
     var q = new URLSearchParams(window.location.search || '');
     if (q.has('alipay')) {
-      window.history.replaceState(null, '', window.location.pathname + '#/recharge?alipay=return');
+      var no = q.get('out_trade_no') || '';
+      var hash = '#/recharge?alipay=return' + (no ? '&out_trade_no=' + encodeURIComponent(no) : '');
+      window.history.replaceState(null, '', window.location.pathname + hash);
     }
   } catch (e) { /* 老浏览器忽略 */ }
 })();

@@ -82,7 +82,7 @@ class ChannelStateTests(StatusBase):
         self.assertTrue(d['can_pay'])
         self.assertEqual(d['active_channel'], 'alipay')
         self.assertEqual(d['ready_channels'], ['alipay'])
-        self.assertEqual(d['channels']['alipay']['label'], '支付宝扫码')
+        self.assertEqual(d['channels']['alipay']['label'], '支付宝（电脑网站支付）')
         self.assertTrue(d['channels']['alipay']['sandbox'])
         self.assertTrue(d['channels']['alipay']['ready'])
         self.assertFalse(d['channels']['wxpay']['ready'])

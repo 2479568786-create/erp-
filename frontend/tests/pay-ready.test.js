@@ -89,8 +89,10 @@ test('active_channel 缺失时按 primary → 就绪渠道顺序回退', () => {
   assert.equal(r.canPay, true);
 });
 
-test('channelShort 把「支付宝扫码」显示成「支付宝」', () => {
+test('channelShort 把「支付宝扫码」「支付宝（电脑网站支付）」都显示成「支付宝」', () => {
   const st = { channels: { alipay: { label: '支付宝扫码' }, wxpay: { label: '微信扫码' } } };
+  const st2 = { channels: { alipay: { label: '支付宝（电脑网站支付）' } } };
+  assert.equal(PayReady.channelShort(st2, 'alipay'), '支付宝');
   assert.equal(PayReady.channelShort(st, 'alipay'), '支付宝');
   assert.equal(PayReady.channelShort(st, 'wxpay'), '微信');
   assert.equal(PayReady.channelShort(null, 'alipay'), '支付宝');

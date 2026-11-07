@@ -81,7 +81,7 @@ PYTHONPATH=/srv/<app>/backend .venv/bin/python -m services.pay_reconcile
 ```
 POST /api/pay/orders   {"points": 10, "channel": "alipay"}
 → 200 {"out_trade_no":"RC…","code_url":"https://qr.alipay.com/…","channel":"alipay",
-       "channel_label":"支付宝扫码","points":10,"amount_cents":1000,"expires_in":900}
+       "channel_label":"支付宝（电脑网站支付）","points":10,"amount_cents":1000,"expires_in":900}
 ```
 - 不传 `channel` 时用主通道（`PAY_PRIMARY_CHANNEL`）；传了不认识的值直接 **400**；
 - biz_content：`out_trade_no` / `total_amount`（**元，两位小数**）/ `subject`（截 256）/ `timeout_express=15m`（与本地 TTL 一致）；

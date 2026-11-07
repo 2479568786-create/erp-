@@ -67,10 +67,10 @@
     return { canPay, channel: active, label, reason, channels, readyChannels, primary, legacy: false };
   }
 
-  /** 渠道短名（用于订单列表徽标）：后端 label「支付宝扫码」→「支付宝」 */
+  /** 渠道短名（用于订单列表徽标）：后端 label「支付宝（电脑网站支付）」→「支付宝」 */
   function channelShort(st, name) {
     if (st && st.channels && st.channels[name] && st.channels[name].label) {
-      return String(st.channels[name].label).replace(/扫码$/, '');
+      return String(st.channels[name].label).replace(/（[^）]*）/g, '').replace(/扫码$/, '');
     }
     return CHANNEL_SHORT[name] || (name || '-');
   }

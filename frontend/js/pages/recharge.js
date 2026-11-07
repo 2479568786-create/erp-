@@ -39,6 +39,7 @@ const RechargePage = (() => {
     accountId: null,       // 管理员代充目标的 account id
     countdownTimer: null,
     pollTimer: null,
+    fastRemaining: 0,       // 回跳后前几次用 0.8s 加密轮询
     banner: null,          // { type, html }
   };
 
@@ -466,6 +467,16 @@ const RechargePage = (() => {
       renderPayButton(o);
     } else if (o.code_url) {
       drawQr(o.code_url);
+    } else {
+      const box = document.getElementById('rcQrTarget');
+      if (box) {
+        box.style.width = '100%';
+        box.style.height = 'auto';
+        box.style.border = '0';
+        box.style.padding = '0';
+        box.innerHTML = '<div style="font-size:13px;color:#475467;line-height:1.7;">'
+          + '该订单已跳转支付宝收银台，无需再次扫码；支付结果会自动更新。</div>';
+      }
     }
   }
 
@@ -548,7 +559,50 @@ const RechargePage = (() => {
 
   function schedulePoll() {
     if (state.pollTimer) clearTimeout(state.pollTimer);
-    state.pollTimer = setTimeout(pollOrder, POLL_MS);
+    let delay = POLL_MS;
+    if (state.fastRemaining > 0) {
+      state.fastRemaining -= 1;
+      delay = 800;                         // 回跳后：0.8s × 6 次 ≈ 前 5 秒加密轮询
+    }
+    state.pollTimer = setTimeout(pollOrder, delay);
+  }
+
+  /** 支付宝回跳后立刻确认一次，再进入加密轮询；回跳参数只当提示，到账仍以 notify 为准 */
+  async function confirmOrderOnce(outTradeNo) {
+    const res = await API.get('/api/pay/orders/' + encodeURIComponent(outTradeNo));
+    if (!res || res.code !== 200 || !res.data) {
+      setBanner('warn', '<strong>已从支付宝返回</strong>：订单状态暂未能确认，请稍后点「刷新」查看（到账以支付宝通知为准）。');
+      return;
+    }
+    const d = res.data;
+    state.order = Object.assign({}, state.order || {}, {
+      out_trade_no: d.out_trade_no,
+      status: d.status,
+      points: d.points != null ? d.points : (state.order && state.order.points),
+      amount_cents: d.amount_cents != null ? d.amount_cents : (state.order && state.order.amount_cents),
+    });
+    if (d.status === 'credited') {
+      clearTimers();
+      paintOrder();
+      setBanner('ok', '<strong>充值成功</strong>：' + pointsText(state.order.points) + ' 点已到账。');
+      Toast.show('充值成功，+' + pointsText(state.order.points) + ' 点', 'success');
+      await refreshAll();
+      return;
+    }
+    if (d.status === 'closed') {
+      clearTimers();
+      paintOrder();
+      setBanner('warn', '<strong>订单已关闭</strong>：如已付款请稍后刷新，或联系管理员核对。');
+      return;
+    }
+    paintOrder();
+    state.fastRemaining = 6;
+    if (d.status === 'paid') {
+      setBanner('info', '<strong>已支付，正在入账</strong>：余额将在几秒内自动刷新。');
+    } else {
+      setBanner('info', '<strong>已从支付宝返回</strong>：正在确认到账状态（约 5 秒内自动刷新）。');
+    }
+    schedulePoll();
   }
 
   async function pollOrder() {
@@ -734,7 +788,7 @@ const RechargePage = (() => {
     try {
       const q = (Router && Router.currentRoute && Router.currentRoute.query) || {};
       if (q.alipay === 'return') {
-        setBanner('info', '<strong>已从支付宝返回</strong>：到账以支付宝异步通知为准，通常几秒内完成；若余额未变，请稍等片刻后刷新（回跳参数不作为到账凭证）。');
+        await confirmOrderOnce(q.out_trade_no || '');
       }
     } catch (e) { /* 忽略 */ }
     // 曾在本页发起、仍在 pending 的订单：不自动恢复（刷新后一律以 15 分钟过期为准）
