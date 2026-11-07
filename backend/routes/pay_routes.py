@@ -42,7 +42,7 @@ def _is_admin(user):
 
 
 # 渠道注册表：新增渠道只加一行 + 一个 config/missing_config 适配器
-CHANNEL_LABELS = {'wxpay': '微信扫码', 'alipay': '支付宝（电脑网站支付）'}
+CHANNEL_LABELS = pay_service.CHANNEL_LABELS   # 唯一来源在 pay_service，这里只引用
 CHANNEL_ORDER = ('wxpay', 'alipay')
 DEFAULT_PRIMARY_CHANNEL = 'alipay'      # 2026-11 起主通道为支付宝，微信保留可切回
 _LEGACY_CHANNEL_NAME = {'wxpay': 'wechat_native', 'alipay': 'alipay_qr'}

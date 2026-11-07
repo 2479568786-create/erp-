@@ -18,7 +18,10 @@ DEFAULT_TIERS = (10, 30, 50, 100, 200)
 ORDER_TTL_MINUTES = 15
 ORDERS_PER_MINUTE = 3
 # 入账流水里的渠道名（operator 前缀与文案都按 channel 区分，避免支付宝订单被记成微信）
-CHANNEL_LABELS = {'wxpay': '微信支付', 'alipay': '支付宝'}
+# 渠道展示名（唯一来源；pay_routes 直接引用，避免两套定义漂移）
+CHANNEL_LABELS = {'wxpay': '微信扫码', 'alipay': '支付宝（电脑网站支付）'}
+# 台账/充值原因里用的短名（业务员对账时看的是这个）
+CHANNEL_SHORT_LABELS = {'wxpay': '微信支付', 'alipay': '支付宝'}
 
 SCHEMA = (
     """CREATE TABLE IF NOT EXISTS pay_orders (
@@ -337,7 +340,7 @@ def credit_order(out_trade_no, conn=None, adjust=None):
         from services import image_billing_service as billing
         adjust = billing.adjust_balance
     channel = (order.get('channel') or 'wxpay')
-    label = CHANNEL_LABELS.get(channel, channel)
+    label = CHANNEL_SHORT_LABELS.get(channel, channel)
     try:
         adjust(order['account_id'], points=order['points'], mode='add',
                reason='%s充值 %s 元' % (label, order['amount_cents'] / 100.0),

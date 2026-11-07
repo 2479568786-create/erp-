@@ -277,6 +277,23 @@ class RouteTests(unittest.TestCase):
         app.config['TESTING'] = True
         cls.client = app.test_client()
 
+    def setUp(self):
+        # 413 分支会写 pay_events 审计；全量跑时别的模块可能把 db.DB_PATH 指到没有建表的库，
+        # 这里显式给本类一个独立库并建表，避免「单独跑绿、全量跑红」的假失败。
+        import db as _db
+        self._tmpdir = tempfile.mkdtemp(prefix='alipay_notify_route_')
+        self._db_patch = patch.object(_db, 'DB_PATH',
+                                      os.path.join(self._tmpdir, 'test.db'))
+        self._db_patch.start()
+        self._prev_ready = pay_service._table_ready
+        pay_service._table_ready = False
+        pay_service.ensure_tables()
+        self.addCleanup(self._restore_db)
+
+    def _restore_db(self):
+        pay_service._table_ready = self._prev_ready
+        self._db_patch.stop()
+
     def test_route_returns_plain_text_success(self):
         with patch.object(alipay_notify, 'handle_notify',
                           return_value=(200, 'success', {'event': 'notify_ok'})) as m:
