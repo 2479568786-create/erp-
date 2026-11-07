@@ -27,8 +27,7 @@ SANDBOX_GATEWAY = 'https://openapi.alipaydev.com/gateway.do'
 DEFAULT_GATEWAY = PROD_GATEWAY
 DEFAULT_KEY_DIR = '/etc/geekozon-erp-pay/alipay'
 
-# 参与签名的参数里必须剔除的两个字段
-SIGN_EXCLUDE = ('sign', 'sign_type')
+# 参与签名的参数剔除规则见下方的 SIGN_EXCLUDE（request/notify 两种口径）
 SUPPORTED_SIGN_TYPES = ('RSA2',)
 
 _private_key_cache = {}
