@@ -12,6 +12,7 @@
 """
 import json
 import os
+import urllib.parse
 
 from flask import Blueprint, request
 
@@ -420,3 +421,54 @@ def alipay_notify_callback():
     digest = pay_service.digest_of(raw)
     status, body, info = alipay_notify.handle_notify(form, digest)
     return body, status, {'Content-Type': 'text/plain; charset=utf-8'}
+
+
+@pay_bp.route('/pay/alipay/return', methods=['GET'])
+def alipay_return():
+    """支付宝同步回跳（page.pay 的 return_url）。
+
+    **只做验签 + 跳回前端展示，绝不当付款依据**：入账只认异步通知（`/pay/alipay/notify`）。
+    这里最多读一次本地订单状态拼进跳转参数，不查渠道、不写库。
+
+    验签通过 → 302 到 `/?alipay=return&out_trade_no=…&state=…`（前端 index.html 会转成
+    `#/recharge?alipay=return` 并轮询本地订单）；验签失败 → 401 + 纯 HTML 提示。
+    """
+    params = request.args.to_dict(flat=True)
+    out_trade_no = (params.get('out_trade_no') or '').strip()
+
+    def _fail_page(reason):
+        body = ('<!doctype html><meta charset="utf-8"><title>支付回跳校验失败</title>'
+                '<div style="font-family:sans-serif;max-width:520px;margin:80px auto;line-height:1.8">'
+                '<h2>支付回跳校验未通过</h2>'
+                '<p>原因：%s</p>'
+                '<p>本次回跳不作为付款依据，请回到 ERP 充值页查看订单真实状态'
+                '（到账以支付宝异步通知为准）。</p>'
+                '<p><a href="/#/recharge">返回充值页</a></p></div>'
+                % (reason or 'signature_failed'))
+        return body, 401, {'Content-Type': 'text/html; charset=utf-8'}
+
+    if not (params.get('sign') or '').strip():
+        return _fail_page('缺少签名参数')
+    try:
+        ok, reason = alipay_service.verify_notify(params)
+    except Exception as exc:  # noqa: BLE001 - 公钥缺失等配置问题
+        pay_service.log_event(out_trade_no or '-', 'alipay_return_verify_error',
+                              type(exc).__name__)
+        return _fail_page('验签异常（%s）' % type(exc).__name__)
+    if not ok:
+        pay_service.log_event(out_trade_no or '-', 'alipay_return_bad_sig', reason)
+        return _fail_page('签名不合法（%s）' % reason)
+
+    state = ''
+    if out_trade_no:
+        order = pay_service.get_order(out_trade_no)
+        if order:
+            state = str(order.get('status') or '')
+        pay_service.log_event(out_trade_no, 'alipay_return_ok',
+                              'state=%s' % (state or 'unknown'))
+    query = 'alipay=return'
+    if out_trade_no:
+        query += '&out_trade_no=' + urllib.parse.quote(out_trade_no)
+    if state:
+        query += '&state=' + urllib.parse.quote(state)
+    return '', 302, {'Location': '/?' + query}
