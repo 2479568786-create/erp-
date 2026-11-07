@@ -414,7 +414,9 @@ def precreate(out_trade_no, amount_cents, subject='Geekfast ERP 图片点数充�
 
 PAGE_PAY_METHOD = 'alipay.trade.page.pay'
 PAGE_PAY_PRODUCT_CODE = 'FAST_INSTANT_TRADE_PAY'
-DEFAULT_RETURN_URL = 'https://tugeekfast.xin/?alipay=return'
+# 占位默认值：生产回跳地址须由 `ALIPAY_RETURN_URL` 环境变量显式配置（见 `config()` 的
+# `return_url`）。默认值不写真实域名，避免公开仓库暴露线上位置。
+DEFAULT_RETURN_URL = 'https://<your-domain>/?alipay=return'
 
 
 def build_page_pay_params(out_trade_no, subject, amount_cents, cfg=None, private_key=None,
