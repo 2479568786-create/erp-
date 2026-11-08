@@ -41,7 +41,8 @@ from routes.ozon_collect_routes import ozon_collect_bp
 from routes.market_intelligence_routes import market_intelligence_bp
 from routes.image_billing_routes import image_billing_bp
 from routes.agent_routes import agent_bp
-from routes.pay_routes import pay_bp
+from routes.pay_routes import pay_bp
+from routes.video_routes import video_bp
 
 try:
     from routes.ad_monitor_routes import ad_monitor_bp
@@ -104,4 +105,5 @@ def register_blueprints(app):
     app.register_blueprint(image_billing_bp, url_prefix='/api')
     app.register_blueprint(agent_bp, url_prefix='/api')
     app.register_blueprint(publish_health_bp, url_prefix='/api')
-    app.register_blueprint(pay_bp, url_prefix='/api')
+    app.register_blueprint(pay_bp, url_prefix='/api')
+    app.register_blueprint(video_bp, url_prefix='/api')

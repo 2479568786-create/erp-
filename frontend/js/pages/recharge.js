@@ -147,7 +147,7 @@ const RechargePage = (() => {
 
             <div class="rc-card" id="rcOrderCard" style="display:none;">
               <div class="rc-card-title">
-                <span id="rcOrderTitle">扫码支付</span>
+                <span id="rcOrderTitle">支付</span>
                 <span class="rc-muted" style="font-size:12px;">剩余 <span class="rc-countdown" id="rcCountdown">--:--</span></span>
               </div>
               <div class="rc-qr-box">
