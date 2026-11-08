@@ -442,8 +442,19 @@ def build_page_pay_params(out_trade_no, subject, amount_cents, cfg=None, private
 
 
 def build_page_pay_form(params, cfg=None):
-    """把已签名参数渲染成自提交表单 HTML（前端插入 DOM 后 submit 即跳支付宝）。"""
+    """把已签名参数渲染成自提交表单 HTML（前端插入 DOM 后 submit 即跳支付宝）。
+
+    **charset 必须出现在 action 的查询字符串里**：支付宝网关在解析表单体之前先用它
+    决定字符集，只把 `charset` 放成隐藏域不够——含中文的 `subject` 会按页面默认编码
+    解析，导致验签失败（实测报 `invalid-signature`，提示「请确认 charset 参数放在了
+    URL 查询字符串中」）。2026-11-08 真浏览器验证后修正。
+    """
     cfg = cfg or config()
+    gateway = cfg['gateway']
+    charset = str(params.get('charset') or 'utf-8')
+    # 保留 gateway 里已有的查询串（沙箱/自定义网关可能带参数），不重复拼 '?'
+    sep = '&' if '?' in gateway else '?'
+    action = '%s%scharset=%s' % (gateway, sep, charset)
     fields = []
     for key in sorted(params):
         value = params[key]
@@ -453,7 +464,7 @@ def build_page_pay_form(params, cfg=None):
                       % (html.escape(str(key), quote=True), html.escape(str(value), quote=True)))
     return ('<form id="alipay-submit" name="alipaysubmit" method="post" accept-charset="utf-8"'
             ' action="%s">\n%s\n</form>'
-            % (html.escape(cfg['gateway'], quote=True), '\n'.join(fields)))
+            % (html.escape(action, quote=True), '\n'.join(fields)))
 
 
 def page_pay(out_trade_no, subject, amount_cents, cfg=None, private_key=None,

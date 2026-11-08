@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """A6 电脑网站支付（alipay.trade.page.pay）单测：参数、金额精度、超时、return_url、表单与签名。"""
 import base64
+import html
 import os
 import sys
 import unittest
@@ -114,6 +115,29 @@ class PagePayTests(unittest.TestCase):
         # 表单字段值必须转义，避免 biz_content 里的引号把 HTML 弄坏
         self.assertNotIn('name="biz_content" value="{"', form)
         self.assertIn('&quot;', form)
+
+    def test_form_action_carries_charset_in_query(self):
+        """action 必须带 ?charset=utf-8：只放隐藏域会导致网关按默认编码解析→invalid-signature。"""
+        built = alipay_service.page_pay(
+            'RC20261108000001', '充值 10 点', 1000, cfg=self.cfg, private_key=self.private,
+            timestamp='2026-11-08 21:00:00')
+        form, params = built['pay_form'], built['params']
+        self.assertIn('action="%s?charset=utf-8"' % alipay_service.PROD_GATEWAY, form)
+        # action 里的 charset 必须与表单字段值一致，避免两处漂移
+        self.assertIn('name="charset" value="%s"' % params['charset'], form)
+        self.assertEqual('utf-8', params['charset'])
+
+    def test_form_action_keeps_existing_query_string(self):
+        """自定义网关自带查询串时用 & 续接（HTML 里转义为 &amp;），不再拼第二个 '?'。"""
+        cfg = dict(self.cfg, gateway='https://openapi.alipay.com/gateway.do?foo=bar')
+        built = alipay_service.page_pay('RC20261108000002', 's', 1000, cfg=cfg,
+                                        private_key=self.private, timestamp='2026-11-08 21:00:01')
+        form = built['pay_form']
+        self.assertIn('action="https://openapi.alipay.com/gateway.do?foo=bar&amp;charset=utf-8"', form)
+        # 浏览器解码后应还原成单个 '&'，且只有一个 '?'
+        decoded = html.unescape(form)
+        self.assertIn('action="https://openapi.alipay.com/gateway.do?foo=bar&charset=utf-8"', decoded)
+        self.assertEqual(1, decoded.count('gateway.do?'))
 
     def test_page_pay_returns_params(self):
         built = alipay_service.page_pay('RC1', 's', 1000, cfg=self.cfg,
