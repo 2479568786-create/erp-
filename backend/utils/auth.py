@@ -28,6 +28,9 @@ _PUBLIC_API_PATHS = {
     # 放行到 handler 后仍必须走 alipay_notify.handle_notify 的 verify_notify，
     # 签名错/缺参数一律拒绝（2026-11-08 生产事故：钱到了、通知 401 被丢，未入账）。
     '/api/pay/alipay/notify',
+    # 支付宝同步回跳：用户浏览器被 302 回来，同样没有 token。**只免登录、不免验签**，
+    # 且该路由只做验签 + 读本地订单状态 + 302 回前端，绝不入账（入账只认异步通知）。
+    '/api/pay/alipay/return',
 }
 
 

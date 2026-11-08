@@ -129,6 +129,13 @@ class WhitelistTests(NotifyBase):
         """白名单只免登录：路径在公开表里，且 handler 仍走验签。"""
         self.assertIn(NOTIFY_PATH, auth_utils._PUBLIC_API_PATHS)
 
+    def test_return_path_is_public_but_still_verifies(self):
+        """回跳路径同样免登录不免验签（2026-11-08 批准，Step 4 真回跳要用）。"""
+        self.assertIn('/api/pay/alipay/return', auth_utils._PUBLIC_API_PATHS)
+        res = self.client.get('/api/pay/alipay/return')
+        body = res.get_data(as_text=True)
+        self.assertNotIn('请先登录', body, body[:200])
+
     def test_post_without_token_reaches_verification_not_login_401(self):
         """不带 token 的 POST 必须走到验签逻辑（回 fail），而不是「请先登录」。"""
         res = self.client.post(NOTIFY_PATH, data={'out_trade_no': 'RC1'})
