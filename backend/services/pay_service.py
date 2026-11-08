@@ -192,6 +192,33 @@ def _write(conn, sql, params=()):
     return _db_execute(sql, params)
 
 
+def _write_affected(conn, sql, params=()):
+    """执行 UPDATE/DELETE 并返回**真实影响行数**。
+
+    为什么需要它：`db.execute()` 返回的是 `cursor.lastrowid`，而 UPDATE 的 lastrowid
+    恒为 0。生产路径（conn=None）若拿 `_write` 的返回值判断「有没有抢到」，会永远判成
+    没抢到——2026-11-08 事故：订单被标 credited、`claim_credit` 却返回 0，`credit_order`
+    误判成 lost_race 并跳过 adjust_balance，钱到账、点数丢失。
+    INSERT 仍走 `_write`（lastrowid 语义不变），避免动到取新 id 的调用点。
+    """
+    if conn is not None:
+        try:
+            cur = conn.execute(sql, params)
+            conn.commit()
+            return cur.rowcount
+        except Exception:
+            conn.rollback()
+            raise
+    from db import get_connection
+    c = get_connection()
+    try:
+        cur = c.execute(sql, params)
+        c.commit()
+        return cur.rowcount
+    finally:
+        c.close()
+
+
 def new_out_trade_no(now=None):
     now = now or datetime.now()
     suffix = ''.join(random.choice(string.digits) for _ in range(6))
@@ -284,7 +311,7 @@ def get_order(out_trade_no, conn=None):
 
 
 def set_code_url(out_trade_no, code_url, prepay_id=None, conn=None):
-    return _write(conn,
+    return _write_affected(conn,
                   "UPDATE pay_orders SET code_url = ?, prepay_id = ?, updated_at = datetime('now') "
                   "WHERE out_trade_no = ?",
                   (code_url, prepay_id, out_trade_no))
@@ -292,7 +319,7 @@ def set_code_url(out_trade_no, code_url, prepay_id=None, conn=None):
 
 def mark_paid(out_trade_no, transaction_id, notify_id=None, notify_digest=None,
               notify_raw=None, conn=None):
-    return _write(conn,
+    return _write_affected(conn,
                   "UPDATE pay_orders SET status = 'paid', transaction_id = ?, notify_id = ?, "
                   "notify_digest = ?, notify_raw = ?, paid_at = datetime('now'), updated_at = datetime('now') "
                   "WHERE out_trade_no = ? AND status = 'created'",
@@ -306,7 +333,7 @@ def mark_paid_from_closed(out_trade_no, transaction_id, notify_id=None, notify_d
     只在支付宝明确 `TRADE_SUCCESS/TRADE_FINISHED` 且金额/交易号校验通过后由
     `alipay_notify` 调用；`WHERE status='closed'` 保证只迁一次（并发/重试安全）。
     """
-    return _write(conn,
+    return _write_affected(conn,
                   "UPDATE pay_orders SET status = 'paid', transaction_id = ?, notify_id = ?, "
                   "notify_digest = ?, notify_raw = ?, paid_at = datetime('now'), "
                   "updated_at = datetime('now') WHERE out_trade_no = ? AND status = 'closed'",
@@ -320,14 +347,14 @@ def digest_seen(out_trade_no, notify_digest, conn=None):
 
 
 def close_order(out_trade_no, conn=None):
-    return _write(conn,
+    return _write_affected(conn,
                   "UPDATE pay_orders SET status = 'closed', updated_at = datetime('now') "
                   "WHERE out_trade_no = ? AND status = 'created'",
                   (out_trade_no,))
 
 
 def claim_credit(out_trade_no, conn=None):
-    changed = _write(conn,
+    changed = _write_affected(conn,
                      "UPDATE pay_orders SET status = 'credited', credited_at = datetime('now'), "
                      "updated_at = datetime('now') WHERE out_trade_no = ? AND status = 'paid'",
                      (out_trade_no,))
@@ -360,7 +387,7 @@ def credit_order(out_trade_no, conn=None, adjust=None):
                reason='%s充值 %s 元' % (label, order['amount_cents'] / 100.0),
                operator='%s:%s' % (channel, out_trade_no))
     except Exception as exc:  # noqa: BLE001
-        _write(conn,
+        _write_affected(conn,
                "UPDATE pay_orders SET status = 'paid', credited_at = NULL, updated_at = datetime('now') "
                "WHERE out_trade_no = ? AND status = 'credited'",
                (out_trade_no,))
@@ -372,10 +399,25 @@ def credit_order(out_trade_no, conn=None, adjust=None):
 
 def expire_created(conn=None, ttl_minutes=ORDER_TTL_MINUTES):
     cutoff = _utc_str((datetime.now() - timedelta(minutes=ttl_minutes)).astimezone())
-    return _write(conn,
+    return _write_affected(conn,
                   "UPDATE pay_orders SET status = 'closed', updated_at = datetime('now') "
                   "WHERE status = 'created' AND created_at < ?",
                   (cutoff,))
+
+
+def audit_credited_without_ledger(conn=None):
+    """对账自检（只读）：已入账但**没有对应 ledger 流水**的订单。
+
+    2026-11-08 事故的症状：`pay_orders.status='credited'`、`credited_at` 有值，
+    但 `image_ops_log` 里没有 `alipay:<单号>` 那一行（`claim_credit` 因 rowcount
+    误判成 lost_race，跳过了 `adjust_balance`）。这条自检用来把同类问题自动捞出来。
+    """
+    return _fetch(conn,
+                  "SELECT o.out_trade_no, o.channel, o.points, o.amount_cents, o.credited_at "
+                  "FROM pay_orders o LEFT JOIN image_ops_log l "
+                  "ON l.operator = (o.channel || ':' || o.out_trade_no) "
+                  "WHERE o.status = 'credited' AND l.id IS NULL ORDER BY o.id",
+                  (), one=False) or []
 
 
 def pending_credit(conn=None, limit=50):
@@ -460,7 +502,7 @@ def mark_refund(out_request_no, status, refund_no=None, trade_no=None,
     """更新退款状态（M3 由渠道退款回调/查单调用）。"""
     if status not in REFUND_STATUSES:
         raise ValueError('非法退款状态：%s' % status)
-    return _write(conn,
+    return _write_affected(conn,
                   "UPDATE pay_refunds SET status = ?, refund_no = COALESCE(?, refund_no), "
                   "trade_no = COALESCE(?, trade_no), notify_digest = COALESCE(?, notify_digest), "
                   "updated_at = datetime('now') WHERE out_request_no = ?",
