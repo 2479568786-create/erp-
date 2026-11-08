@@ -127,7 +127,7 @@ const RechargePage = (() => {
                 <div class="rc-balance-num"><span id="rcBalance">--</span><small>点</small></div>
                 <div class="rc-balance-meta">
                   <div>账号：<b id="rcAccountName">--</b> <span class="rc-tag" id="rcRoleTag" style="display:none;">管理员</span></div>
-                  <div>单张扣点：<b id="rcPrice">--</b> <span class="rc-muted">点/张（基准价；实际按所选生图模型 0.065–0.3 扣）</span></div>
+                  <div>单张扣点：<b id="rcPrice">--</b> <span class="rc-muted">点/张（默认模型 tt-image-2；不同模型 0.065–0.3）</span></div>
                 </div>
               </div>
             </div>

@@ -3913,7 +3913,7 @@ async function openSkuReferenceSuite(skuIndex) {
     .map(item => ({ id: item.id, label: item.label || item.id, points: Number(item.points || 0) }));
   const suiteModelOptions = providerModelList.length ? providerModelList : [
     { id: 'banana-2.1', label: '香蕉 2.1', points: 0.204 },
-    { id: 'tt-image-2', label: 'TT Image 2', points: 0.2 },
+    { id: 'tt-image-2', label: 'TT Image 2', points: 0.1 },
   ];
   const state = {
     skuIndex, sessionId: window._editSessionId, originals: images.slice(), selected: new Set(),
