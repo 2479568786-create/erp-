@@ -39,7 +39,15 @@ def _load_env_file(path, override=False):
 
 
 def _load_env():
-    """先读专用支付配置（geekozon 可读），再读主 env（root 600 时读不到就跳过）。"""
+    """按「cron 用户可读」优先加载：
+    1. 支付宝专用配置 `/etc/geekozon-erp-pay/alipay/pay.env`（600 geekozon，cron 读得到）
+    2. 微信专用配置 `/etc/geekozon-erp/wechatpay/pay.env`
+    3. 主 env `/etc/geekozon-erp.env`（600 root，cron 用户读不到就跳过）
+
+    2026-11-09 修：此前 cron 以 geekozon 跑，读不到 root-only 主 env，支付宝查单缺 app_id，
+    网关回「响应缺少 sign」，对账的支付宝路径实际从未工作过。
+    """
+    _load_env_file('/etc/geekozon-erp-pay/alipay/pay.env', override=True)
     _load_env_file('/etc/geekozon-erp/wechatpay/pay.env', override=True)
     _load_env_file('/etc/geekozon-erp.env')
 
