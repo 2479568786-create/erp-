@@ -127,7 +127,7 @@ const RechargePage = (() => {
                 <div class="rc-balance-num"><span id="rcBalance">--</span><small>点</small></div>
                 <div class="rc-balance-meta">
                   <div>账号：<b id="rcAccountName">--</b> <span class="rc-tag" id="rcRoleTag" style="display:none;">管理员</span></div>
-                  <div>单价：<b id="rcPrice">--</b> <span class="rc-muted">/ 张（按所选生图模型扣点）</span></div>
+                  <div>单张扣点：<b id="rcPrice">--</b> <span class="rc-muted">点/张（基准价；实际按所选生图模型 0.065–0.3 扣）</span></div>
                 </div>
               </div>
             </div>
@@ -147,7 +147,7 @@ const RechargePage = (() => {
 
             <div class="rc-card" id="rcOrderCard" style="display:none;">
               <div class="rc-card-title">
-                <span>扫码支付</span>
+                <span id="rcOrderTitle">扫码支付</span>
                 <span class="rc-muted" style="font-size:12px;">剩余 <span class="rc-countdown" id="rcCountdown">--:--</span></span>
               </div>
               <div class="rc-qr-box">
@@ -257,6 +257,28 @@ const RechargePage = (() => {
     const st = state.status;
     const ok = !!(st && st.enabled && st.ready);
     return { canPay: ok, channel: ok ? 'wxpay' : null, label: ok ? '微信扫码' : '', primary: null };
+  }
+
+  /** 按渠道出文案：支付宝是「跳转支付」，不是扫码（2026-11-09 修） */
+  function payCopy() {
+    const ch = readiness().channel || 'alipay';
+    const isAlipay = ch === 'alipay';
+    return {
+      channel: ch,
+      step: isAlipay ? '选档位 → 去支付宝支付 → 跳转付款' : '选档位 → 生成二维码 → 扫码支付',
+      button: isAlipay ? '去支付宝支付' : '生成充值二维码',
+      panelTitle: isAlipay ? '支付宝支付' : '扫码支付',
+      verb: isAlipay ? '跳转' : '扫码',
+    };
+  }
+
+  /** 把渠道文案刷到按钮/面板标题上（status 加载后调用） */
+  function applyPayCopy() {
+    const copy = payCopy();
+    const btn = document.getElementById('rcPayBtn');
+    if (btn) btn.textContent = copy.button;
+    const title = document.getElementById('rcOrderTitle');
+    if (title) title.textContent = copy.panelTitle;
   }
 
   function canPay() {
@@ -391,6 +413,7 @@ const RechargePage = (() => {
     }
     renderStatusBanner();
     renderTiers();
+    applyPayCopy();
   }
 
   function renderStatusBanner() {
@@ -405,7 +428,8 @@ const RechargePage = (() => {
       const switchTip = (r.primary && r.channel && r.primary !== r.channel)
         ? `（主通道${channelName(r.primary)}未就绪，已自动切到${label}）`
         : '';
-      setBanner('ok', `<strong>${esc(label)}充值已开通</strong>：选档位 → 生成二维码 → 扫码支付，到账后余额自动刷新。${esc(switchTip)}`);
+      const copy = payCopy();
+      setBanner('ok', `<strong>${esc(label)}充值已开通</strong>：${esc(copy.step)}，到账后余额自动刷新。${esc(switchTip)}`);
       return;
     }
     const missingNames = (st.missing && st.missing.length) ? st.missing.join('、') : '';
@@ -675,7 +699,7 @@ const RechargePage = (() => {
         setBanner('info', `二维码已生成：请用${esc(channelText)}扫一扫支付，<b>15 分钟内有效</b>，支付后余额自动到账。`);
       }
     } finally {
-      if (btn) { btn.disabled = !canPay(); btn.textContent = '生成充值二维码'; }
+      if (btn) { btn.disabled = !canPay(); btn.textContent = payCopy().button; }
     }
   }
 
