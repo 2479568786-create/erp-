@@ -137,5 +137,61 @@ class ReconcileCronPathTests(ProdPathBase):
         self.assertEqual([], pay_service.audit_credited_without_ledger())
 
 
+class DuplicateNotifyProdPathTests(ProdPathBase):
+    """幂等的唯一证据：同一份合法通知连到两次 → 只加一次点、流水只有一行。
+
+    生产重放做不了（快照报文已被打码/加前缀，不是签名覆盖的原件），所以用这条单测顶上。
+    """
+
+    def test_duplicate_notify_credits_once_and_keeps_single_ledger_row(self):
+        import hashlib
+        from services import alipay_notify, image_billing_service
+
+        no = 'RC20261109000002'
+        pay_service.create_order(no, 8, 8, 10, 1000, channel='alipay')
+        pay_service._write_affected(
+            None, "UPDATE pay_orders SET status='paid' WHERE out_trade_no=?", (no,))
+
+        calls = []
+
+        def fake_adjust(account_id, points=None, mode=None, reason=None, operator=None):
+            calls.append(operator)
+            pay_service._write_affected(
+                None, "INSERT INTO image_ops_log (account_id, action, operator, reason, amount_cents) "
+                      "VALUES (?, 'balance_add', ?, ?, 1000)", (account_id, operator, reason))
+            return {'ok': True}
+
+        def form(notify_id):
+            p = {'app_id': '2021007118626312', 'out_trade_no': no,
+                 'trade_no': '2026110822001400000000000077', 'total_amount': '10.00',
+                 'trade_status': 'TRADE_SUCCESS', 'notify_id': notify_id, 'charset': 'utf-8'}
+            p['sign'] = 'x' * 32
+            p['sign_type'] = 'RSA2'
+            return p
+
+        cfg = {'app_id': '2021007118626312'}
+        verify = lambda _f: (True, 'ok')  # noqa: E731 - 验签由其它用例覆盖
+        d1 = hashlib.sha256(b'first').hexdigest()
+        d2 = hashlib.sha256(b'second').hexdigest()
+
+        with patch.object(image_billing_service, 'adjust_balance', fake_adjust):
+            s1, b1, i1 = alipay_notify.handle_notify(form('n1'), d1, conn=None, cfg=cfg,
+                                                    verify=verify, adjust=fake_adjust)
+            s2, b2, i2 = alipay_notify.handle_notify(form('n2'), d2, conn=None, cfg=cfg,
+                                                    verify=verify, adjust=fake_adjust)
+
+        self.assertEqual((200, 'success'), (s1, b1), i1)
+        self.assertTrue(i1['credited'])
+        self.assertEqual((200, 'success'), (s2, b2), i2)
+        self.assertEqual('already_credited', i2['event'])
+        self.assertTrue(i2['credited'])
+        self.assertEqual(1, len(calls), '第二次通知不能再加点')
+        rows = pay_service._fetch(
+            None, "SELECT count(*) AS n FROM image_ops_log WHERE operator = ?",
+            ('alipay:%s' % no,))
+        self.assertEqual(1, rows['n'], 'ledger 必须只有一行')
+        self.assertEqual('credited', self._row(no)['status'])
+
+
 if __name__ == '__main__':
     unittest.main()
