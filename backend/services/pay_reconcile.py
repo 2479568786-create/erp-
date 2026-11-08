@@ -119,20 +119,79 @@ def reconcile_stale_created(conn=None, query=None, adjust=None, limit=50,
     return summary
 
 
+def reconcile_closed_paid(conn=None, query=None, adjust=None, limit=50):
+    """断线补偿：本地 `closed` 但远端已 `TRADE_SUCCESS/FINISHED` → 收敛入账。
+
+    场景：先关单、后付款（2026-11-08 事故的形态），或通知完全丢失。金额/交易号校验不过
+    一律不补、记事件。
+    """
+    query = query or alipay_service.query_trade
+    summary = {'checked': 0, 'credited': 0, 'skipped': 0, 'failed': 0, 'details': []}
+    for order in pay_service.stale_closed(limit=limit, conn=conn):
+        no = order['out_trade_no']
+        summary['checked'] += 1
+        try:
+            payload = query(no)
+        except Exception as exc:  # noqa: BLE001
+            summary['failed'] += 1
+            _log(no, 'recon_closed_query_fail', str(exc)[:200], conn)
+            continue
+        code = str(payload.get('code') or '')
+        status = str(payload.get('trade_status') or '').upper()
+        if code and code != '10000':
+            summary['skipped'] += 1
+            summary['details'].append({'out_trade_no': no, 'action': 'biz_error:%s' % (payload.get('sub_code') or code)})
+            continue
+        if status not in PAID_STATUSES:
+            summary['skipped'] += 1
+            summary['details'].append({'out_trade_no': no, 'action': 'not_paid:%s' % (status or '-')})
+            continue
+        try:
+            paid_cents = alipay_service.amount_to_cents(payload.get('total_amount'))
+        except ValueError:
+            summary['failed'] += 1
+            _log(no, 'recon_closed_bad_amount_format', '', conn)
+            continue
+        if int(paid_cents) != int(order['amount_cents']):
+            summary['skipped'] += 1
+            summary['details'].append({'out_trade_no': no, 'action': 'amount_mismatch'})
+            _log(no, 'recon_closed_amount_mismatch',
+                 'paid=%s order=%s' % (paid_cents, order['amount_cents']), conn)
+            continue
+        trade_no = str(payload.get('trade_no') or '')
+        rows = pay_service.mark_paid_from_closed(no, trade_no, notify_id='',
+                                                 notify_digest='recon:%s' % (trade_no or no),
+                                                 notify_raw='recon_closed_paid', conn=conn)
+        _log(no, 'recon_closed_paid', 'trade_status=%s rows=%s trade_no_len=%d'
+             % (status, rows, len(trade_no)), conn)
+        result = pay_service.credit_order(no, conn=conn, adjust=adjust)
+        if result.get('ok'):
+            summary['credited'] += 1
+            summary['details'].append({'out_trade_no': no, 'action': 'converged:%s' % result.get('reason')})
+            _log(no, 'recon_closed_credited', result.get('reason') or '', conn)
+        else:
+            summary['failed'] += 1
+            summary['details'].append({'out_trade_no': no, 'action': 'credit_fail:%s' % result.get('reason')})
+            _log(no, 'recon_closed_credit_fail', str(result.get('reason')), conn)
+    return summary
+
+
 def reconcile(conn=None, query=None, adjust=None, limit=50,
               min_age_seconds=DEFAULT_MIN_AGE_SECONDS, now_ts=None):
-    """一次完整对账：先补入账、再查单补偿。返回合并后的汇总。"""
+    """一次完整对账：补入账 → 查单补偿（created）→ 断线补偿（closed 但已付）。"""
     a = retry_pending_credits(conn=conn, adjust=adjust, limit=limit)
     b = reconcile_stale_created(conn=conn, query=query, adjust=adjust, limit=limit,
                                 min_age_seconds=min_age_seconds, now_ts=now_ts)
+    c2 = reconcile_closed_paid(conn=conn, query=query, adjust=adjust, limit=limit)
     return {
-        'checked': a['checked'] + b['checked'],
-        'credited': a['credited'] + b['credited'],
-        'skipped': a['skipped'] + b['skipped'],
-        'failed': a['failed'] + b['failed'],
+        'checked': a['checked'] + b['checked'] + c2['checked'],
+        'credited': a['credited'] + b['credited'] + c2['credited'],
+        'skipped': a['skipped'] + b['skipped'] + c2['skipped'],
+        'failed': a['failed'] + b['failed'] + c2['failed'],
         'credit_retried': a['credited'],
-        'queried': b['checked'],
-        'details': a['details'] + b['details'],
+        'queried': b['checked'] + c2['checked'],
+        'closed_converged': c2['credited'],
+        'details': a['details'] + b['details'] + c2['details'],
     }
 
 

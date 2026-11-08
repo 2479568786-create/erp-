@@ -405,6 +405,14 @@ def expire_created(conn=None, ttl_minutes=ORDER_TTL_MINUTES):
                   (cutoff,))
 
 
+def stale_closed(channel='alipay', limit=50, conn=None):
+    """本地 closed 的单（断线补偿用：先关单后付款的竞态，远端可能已支付）。"""
+    return _fetch(conn,
+                  "SELECT * FROM pay_orders WHERE status = 'closed' AND channel = ? "
+                  "ORDER BY COALESCE(updated_at, created_at) DESC LIMIT ?",
+                  (channel, limit), one=False) or []
+
+
 def audit_credited_without_ledger(conn=None):
     """对账自检（只读）：已入账但**没有对应 ledger 流水**的订单。
 

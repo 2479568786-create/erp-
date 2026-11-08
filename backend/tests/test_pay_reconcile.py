@@ -312,3 +312,56 @@ class RefundPlaceholderTests(Base):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ClosedPaidCompensationTests(Base):
+    """断线补偿：本地 closed 但远端已 TRADE_SUCCESS（2026-11-08 竞态形态）。"""
+
+    def _close(self, no):
+        pay_service.close_order(no, conn=self.conn)
+
+    def test_closed_but_remote_paid_converges_and_credits(self):
+        no = self._seed()
+        self._close(no)
+        q = lambda _no: {'code': '10000', 'trade_status': 'TRADE_SUCCESS',
+                         'total_amount': '10.00', 'trade_no': 'TCLOSED1'}
+        s = pay_reconcile.reconcile_closed_paid(conn=self.conn, query=q, adjust=self.adjust)
+        self.assertEqual(1, s['credited'], s)
+        self.assertEqual('credited', pay_service.get_order(no, conn=self.conn)['status'])
+        self.assertEqual(1, len(self.credited))
+        self.assertEqual('alipay:%s' % no, self.credited[0]['operator'])
+
+    def test_closed_amount_mismatch_not_credited(self):
+        no = self._seed()
+        self._close(no)
+        q = lambda _no: {'code': '10000', 'trade_status': 'TRADE_SUCCESS',
+                         'total_amount': '9.99', 'trade_no': 'TCLOSED2'}
+        s = pay_reconcile.reconcile_closed_paid(conn=self.conn, query=q, adjust=self.adjust)
+        self.assertEqual(0, s['credited'], s)
+        self.assertEqual([], self.credited)
+        self.assertEqual('closed', pay_service.get_order(no, conn=self.conn)['status'])
+
+    def test_closed_not_paid_stays_closed(self):
+        no = self._seed()
+        self._close(no)
+        q = lambda _no: {'code': '40004', 'sub_code': 'ACQ.TRADE_NOT_EXIST'}
+        s = pay_reconcile.reconcile_closed_paid(conn=self.conn, query=q, adjust=self.adjust)
+        self.assertEqual(0, s['credited'])
+        self.assertEqual('closed', pay_service.get_order(no, conn=self.conn)['status'])
+
+    def test_reconcile_aggregate_includes_closed_convergence(self):
+        no = self._seed()
+        self._close(no)
+        q = lambda _no: {'code': '10000', 'trade_status': 'TRADE_SUCCESS',
+                         'total_amount': '10.00', 'trade_no': 'TCLOSED3'}
+        res = pay_reconcile.reconcile(conn=self.conn, query=q, adjust=self.adjust)
+        self.assertGreaterEqual(res.get('closed_converged', 0), 1, res)
+        self.assertGreaterEqual(res.get('credited', 0), 1, res)
+
+    def test_cron_script_runs_ledger_audit(self):
+        """对账脚本必须每轮跑 audit_credited_without_ledger 并可报警（契约测试）。"""
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        src = open(os.path.join(here, 'scripts', 'reconcile_pay.py'), encoding='utf-8').read()
+        self.assertIn('audit_credited_without_ledger', src)
+        self.assertIn('[reconcile][ERROR] credited without ledger', src)
+        self.assertIn('reconcile_closed_paid', src)

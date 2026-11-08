@@ -72,6 +72,30 @@ def main():
         print('  credit %s -> %s' % (no, result.get('reason')))
         pay_service.log_event(no, 'reconcile', str(result.get('reason')))
 
+    # 断线补偿：本地 closed 但远端已 TRADE_SUCCESS（先关单后付款 / 通知全丢）
+    try:
+        from services import pay_reconcile
+        conv = {'checked': 0, 'credited': 0, 'skipped': 0, 'failed': 0}
+        if not dry:
+            conv = pay_reconcile.reconcile_closed_paid(conn=None, adjust=None)
+        print('[reconcile] closed_paid checked=%s credited=%s skipped=%s failed=%s'
+              % (conv.get('checked'), conv.get('credited'), conv.get('skipped'), conv.get('failed')))
+        failed += int(conv.get('failed') or 0)
+    except Exception as exc:  # noqa: BLE001 - 补偿失败不能中断其它对账
+        print('[reconcile][ERROR] closed_paid failed: %s: %s' % (type(exc).__name__, str(exc)[:150]))
+        failed += 1
+
+    # 自检：标了已入账但没有 ledger 流水（2026-11-08 事故形态）→ ERROR 日志 + 落事件
+    hits = pay_service.audit_credited_without_ledger()
+    print('[reconcile] credited_without_ledger = %d' % len(hits))
+    for h in hits:
+        print('[reconcile][ERROR] credited without ledger: %s channel=%s points=%s credited_at=%s'
+              % (h['out_trade_no'], h['channel'], h['points'], h['credited_at']))
+        if not dry:
+            pay_service.log_event(h['out_trade_no'], 'recon_credited_without_ledger',
+                                  'channel=%s points=%s credited_at=%s'
+                                  % (h['channel'], h['points'], h['credited_at']))
+
     print('[reconcile] stats =', pay_service.stats())
     if failed:
         print('[reconcile] FAILED=%d' % failed)
