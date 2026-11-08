@@ -13,8 +13,14 @@
   ② mark_paid 的 WHERE status='created'（并发/重试只落一次 paid）
   ③ claim_credit 的 WHERE status='paid'（同一订单只加一次点）
 
-应答口径：业务异常一律回 `success` 让支付宝停止重试（同时落 pay_events 供对账），
-只有验签/身份类失败回 `fail`（让支付宝按官方策略重试），与微信实现保持一致。
+应答口径（2026-11-08 重定，按 Chief 决策）：
+  - 验签失败/缺参数、app_id/seller_id 不符 → 回 `fail`（让支付宝继续重试）
+  - 订单不存在、金额/交易号不匹配 → 记事件 → 回 `fail`（不静默吞掉）
+  - 已入账（credited_at 非空）→ 幂等 no-op，回 `success`（绝不重复加点）
+  - `created` + 已付 → mark_paid → credit_order → 回 `success`
+  - `closed` + 已付（关单竞态）→ **允许收敛**：closed→paid→credit，记
+    `paid_on_closed_order_autocredited`（必须显眼，根因是关单时机太早）→ 回 `success`
+理由：钱已经进了商家账户，判「给点」比判「不给点」更安全；但每次收敛都必须留痕。
 """
 from services import alipay_service, pay_service
 
@@ -30,6 +36,35 @@ def _log(out_trade_no, event, detail, conn):
         pay_service.log_event(out_trade_no or '-', event, detail, conn=conn)
     except Exception:  # noqa: BLE001 - 审计写失败不能影响主流程
         pass
+
+
+_SENSITIVE_KEYS = ('buyer_logon_id', 'buyer_open_id')
+
+
+def _mask(value):
+    s = str(value or '')
+    if '@' in s:
+        name, domain = s.split('@', 1)
+        return '%s***@%s' % (name[:3], domain)
+    return s[:3] + '***' + s[-2:] if len(s) > 5 else '***'
+
+
+def _snapshot(form, digest, conn):
+    """验签前落一条完整字段快照（`sign` 保留原值，供重放/复盘；仅打码买家标识）。
+
+    只进 pay_events，不进 journal / git。限长 2000 字符（列约束），超长标注 truncated。
+    """
+    parts = []
+    for key in sorted(form):
+        value = str(form.get(key) or '')
+        if key in _SENSITIVE_KEYS:
+            value = _mask(value)
+        parts.append('%s=%s' % (key, value))
+    text = '&'.join(parts)
+    if len(text) > 1880:
+        text = text[:1880] + '...truncated'
+    _log(form.get('out_trade_no') or '-', 'alipay_notify_body',
+         'digest=%s|%s' % (str(digest or '')[:12], text), conn)
 
 
 def handle_notify(form, digest, conn=None, cfg=None, verify=None, adjust=None):
@@ -48,6 +83,9 @@ def handle_notify(form, digest, conn=None, cfg=None, verify=None, adjust=None):
     verify = verify or alipay_service.verify_notify
     cfg = cfg or alipay_service.config()
     info = {'event': '', 'out_trade_no': '', 'credited': False}
+
+    # 0) 请求体快照（验签之前，字段全留；sign 保留原值，买家标识打码）
+    _snapshot(form, digest, conn)
 
     # 1) 验签（唯一信任入口）
     try:
@@ -82,12 +120,20 @@ def handle_notify(form, digest, conn=None, cfg=None, verify=None, adjust=None):
     if not order:
         _log(out_trade_no, 'alipay_notify_unknown_order', trade_status, conn)
         info['event'] = 'unknown_order'
-        return 200, SUCCESS_TEXT, info
+        return 200, FAIL_TEXT, info      # 可能是建单竞态：回 fail 让支付宝重试
 
     if (order.get('channel') or '') != 'alipay':
         _log(out_trade_no, 'alipay_notify_channel_mismatch',
              'channel=%s' % order.get('channel'), conn)
         info['event'] = 'channel_mismatch'
+        return 200, SUCCESS_TEXT, info
+
+    # 幂等第一优先：已入账 → no-op success，绝不重复加点（第二、三次通知走这里）
+    if order.get('credited_at'):
+        _log(out_trade_no, 'alipay_notify_already_credited',
+             'credited_at=%s trade_status=%s' % (order['credited_at'], trade_status), conn)
+        info['event'] = 'already_credited'
+        info['credited'] = True
         return 200, SUCCESS_TEXT, info
 
     # 3) 状态分支
@@ -114,12 +160,12 @@ def handle_notify(form, digest, conn=None, cfg=None, verify=None, adjust=None):
     except ValueError as exc:
         _log(out_trade_no, 'alipay_notify_bad_amount_format', str(exc)[:120], conn)
         info['event'] = 'bad_amount_format'
-        return 200, SUCCESS_TEXT, info
+        return 200, FAIL_TEXT, info
     if int(paid_cents) != int(order.get('amount_cents') or 0):
         _log(out_trade_no, 'alipay_notify_bad_amount',
              'paid=%s order=%s' % (paid_cents, order.get('amount_cents')), conn)
         info['event'] = 'bad_amount'
-        return 200, SUCCESS_TEXT, info
+        return 200, FAIL_TEXT, info
 
     # 6) trade_no 一致性：同一订单已被别的支付宝交易号付过，不覆盖、不重复入账
     trade_no = str(form.get('trade_no') or '')
@@ -127,9 +173,11 @@ def handle_notify(form, digest, conn=None, cfg=None, verify=None, adjust=None):
         _log(out_trade_no, 'alipay_notify_trade_no_mismatch',
              'order_trade_no_len=%d' % len(str(order['transaction_id'])), conn)
         info['event'] = 'trade_no_mismatch'
-        return 200, SUCCESS_TEXT, info
+        return 200, FAIL_TEXT, info
 
-    # 7) 置为已支付（第二层幂等：只从 created 迁一次）
+    # 7) 置为已支付
+    #    created：正常迁移（第二层幂等，只从 created 迁一次）
+    #    closed ：**关单竞态收敛**——钱已经付了，必须入账，但要响亮留痕（Chief 2026-11-08 定）
     if order.get('status') == 'created':
         try:
             pay_service.mark_paid(out_trade_no, trade_no,
@@ -139,6 +187,14 @@ def handle_notify(form, digest, conn=None, cfg=None, verify=None, adjust=None):
                                   conn=conn)
         except Exception as exc:  # noqa: BLE001 - 唯一索引冲突=重复/并发
             _log(out_trade_no, 'alipay_notify_mark_paid_dup', str(exc)[:200], conn)
+    elif order.get('status') == 'closed':
+        rows = pay_service.mark_paid_from_closed(
+            out_trade_no, trade_no, notify_id=str(form.get('notify_id') or ''),
+            notify_digest=digest, notify_raw='closed_converge', conn=conn)
+        _log(out_trade_no, 'paid_on_closed_order_autocredited',
+             'reason=local_closed_before_notify(关单竞态窗口) rows=%s trade_no=%s amount=%s pay_at=%s'
+             % (rows, trade_no, form.get('total_amount'),
+                form.get('gmt_payment') or form.get('send_pay_date')), conn)
 
     # 8) 入账（第三层幂等：claim_credit 只成功一次）
     result = pay_service.credit_order(out_trade_no, conn=conn, adjust=adjust)

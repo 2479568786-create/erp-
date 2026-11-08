@@ -135,7 +135,8 @@ class IdempotencyTests(Base):
         self.assertTrue(all(r[0] == 200 and r[1] == 'success' for r in results))
         self.assertEqual(len(self.credited), 1)
         self.assertEqual(self._order()['status'], 'credited')
-        self.assertEqual(self._events().count('alipay_notify_duplicate'), 4)
+        # 第 2–5 次命中「已入账」短路（2026-11-08 起先判 credited_at，再判 digest 去重）
+        self.assertEqual(self._events().count('alipay_notify_already_credited'), 4)
 
     def test_new_notify_id_same_trade_no_no_double_credit(self):
         self._seed()
@@ -199,19 +200,20 @@ class SecurityTests(Base):
 
 
 class AmountTests(Base):
-    def test_mismatched_amount_acked_but_not_credited(self):
+    def test_mismatched_amount_refused_and_not_credited(self):
+        """金额不一致：不入账、回 fail（让支付宝继续重试），2026-11-08 口径。"""
         self._seed(amount_cents=1000)
         status, body, info = self._handle(self._form(total_amount='9.99'))
-        self.assertEqual((status, body), (200, 'success'), info)
+        self.assertEqual((status, body), (200, 'fail'), info)
         self.assertEqual(info['event'], 'bad_amount')
         self.assertEqual(self._order()['status'], 'created')
         self.assertEqual(self.credited, [])
         self.assertIn('alipay_notify_bad_amount', self._events())
 
-    def test_bad_amount_format_acked_but_not_credited(self):
+    def test_bad_amount_format_refused_and_not_credited(self):
         self._seed()
         status, body, info = self._handle(self._form(total_amount='10.001'))
-        self.assertEqual((status, body), (200, 'success'), info)
+        self.assertEqual((status, body), (200, 'fail'), info)
         self.assertEqual(info['event'], 'bad_amount_format')
         self.assertEqual(self.credited, [])
 
@@ -237,10 +239,11 @@ class StatusBranchTests(Base):
         self.assertEqual(self._order()['status'], 'closed')
         self.assertEqual(self.credited, [])
 
-    def test_unknown_order_acked(self):
+    def test_unknown_order_asks_retry(self):
+        """订单不存在可能是建单竞态：按 2026-11-08 口径回 fail 让支付宝重试。"""
         form = self._form(out_trade_no='RC_NOT_EXIST')
         status, body, info = self._handle(form)
-        self.assertEqual((status, body), (200, 'success'), info)
+        self.assertEqual((status, body), (200, 'fail'), info)
         self.assertEqual(info['event'], 'unknown_order')
 
     def test_wxpay_order_ignored_by_alipay_notify(self):
@@ -260,7 +263,9 @@ class StatusBranchTests(Base):
                             notify_id='2026110600222000000003')
         status, body, info = self._handle(second)
         self.assertEqual((status, body), (200, 'success'))
-        self.assertEqual(info['event'], 'trade_no_mismatch')
+        # 已入账后先命中断路（already_credited），旧口径的 trade_no_mismatch 不再触发；
+        # 关键契约不变：绝不二次加点、transaction_id 不被覆盖
+        self.assertIn(info['event'], ('already_credited', 'trade_no_mismatch'))
         self.assertEqual(len(self.credited), 1)
         self.assertEqual(self._order()['transaction_id'], TRADE_NO)
 

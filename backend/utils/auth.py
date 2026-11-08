@@ -24,6 +24,10 @@ _PUBLIC_API_PATHS = {
     '/api/health',
     '/api/config',
     '/api/payment/wechat/callback',
+    # 支付宝异步通知：**只免登录、不免验签**。支付宝服务端没有我们的登录 token，
+    # 放行到 handler 后仍必须走 alipay_notify.handle_notify 的 verify_notify，
+    # 签名错/缺参数一律拒绝（2026-11-08 生产事故：钱到了、通知 401 被丢，未入账）。
+    '/api/pay/alipay/notify',
 }
 
 

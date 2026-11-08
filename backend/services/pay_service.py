@@ -299,6 +299,20 @@ def mark_paid(out_trade_no, transaction_id, notify_id=None, notify_digest=None,
                   (transaction_id, notify_id, notify_digest, notify_raw, out_trade_no))
 
 
+def mark_paid_from_closed(out_trade_no, transaction_id, notify_id=None, notify_digest=None,
+                          notify_raw=None, conn=None):
+    """关单竞态收敛：把本地 `closed` 纠正为 `paid`（只为让入账链路继续）。
+
+    只在支付宝明确 `TRADE_SUCCESS/TRADE_FINISHED` 且金额/交易号校验通过后由
+    `alipay_notify` 调用；`WHERE status='closed'` 保证只迁一次（并发/重试安全）。
+    """
+    return _write(conn,
+                  "UPDATE pay_orders SET status = 'paid', transaction_id = ?, notify_id = ?, "
+                  "notify_digest = ?, notify_raw = ?, paid_at = datetime('now'), "
+                  "updated_at = datetime('now') WHERE out_trade_no = ? AND status = 'closed'",
+                  (transaction_id, notify_id, notify_digest, notify_raw, out_trade_no))
+
+
 def digest_seen(out_trade_no, notify_digest, conn=None):
     """同一条回调（原文相同）是否已处理过。"""
     row = _fetch(conn, "SELECT out_trade_no FROM pay_orders WHERE notify_digest = ?", (notify_digest,))
