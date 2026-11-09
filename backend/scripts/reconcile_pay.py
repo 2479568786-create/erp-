@@ -10,6 +10,7 @@
 用法：
     /srv/<app>/backend/.venv/bin/python /srv/<app>/backend/scripts/reconcile_pay.py [--dry-run]
 """
+import json
 import os
 import sys
 
@@ -103,6 +104,21 @@ def main():
             pay_service.log_event(h['out_trade_no'], 'recon_credited_without_ledger',
                                   'channel=%s points=%s credited_at=%s'
                                   % (h['channel'], h['points'], h['credited_at']))
+
+    # 每日/每轮汇总：最近 24h 有没有入账失败（只读，探针假失败单列不计）
+    try:
+        from services import pay_diagnostics as diag
+        summary = diag.failure_summary(hours=24)
+        line = diag.one_line(summary)
+        print('[reconcile][summary] ' + line)
+        if summary['total']:
+            print('[reconcile][WARN] 近 24h 失败明细：%s' % json.dumps(
+                {'by_class': summary['by_class'],
+                 'orders': [{k: o[k] for k in ('out_trade_no', 'count', 'classes', 'last_at')}
+                            for o in summary['orders']]}, ensure_ascii=False)[:600])
+            failed += 1
+    except Exception as exc:  # noqa: BLE001 - 汇总失败不影响对账
+        print('[reconcile][WARN] diagnostics summary failed: %s' % type(exc).__name__)
 
     print('[reconcile] stats =', pay_service.stats())
     if failed:

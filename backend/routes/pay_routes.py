@@ -90,6 +90,27 @@ def _active_channel(primary, channels):
     return None
 
 
+@pay_bp.route('/pay/diagnostics', methods=['GET'])
+@handle_errors
+def pay_diagnostics():
+    """只读诊断：最近 N 小时有没有入账失败、失败几次、哪几单。
+
+    只读 `pay_events`，不改任何状态。探针/畸形请求（无签名的 `bad_sig`）单列，不计入失败。
+    需要登录；`hours` 默认 24、上限 168。
+    """
+    user, err = _current_user_or_401()
+    if err:
+        return err
+    try:
+        hours = int(request.args.get('hours') or 24)
+    except (TypeError, ValueError):
+        hours = 24
+    hours = max(1, min(hours, 168))
+    from services import pay_diagnostics as diag
+    summary = diag.failure_summary(hours=hours)
+    return success_response(dict(summary, one_line=diag.one_line(summary)))
+
+
 @pay_bp.route('/pay/status', methods=['GET'])
 @handle_errors
 def pay_status():

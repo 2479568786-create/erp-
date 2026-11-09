@@ -405,12 +405,24 @@ def expire_created(conn=None, ttl_minutes=ORDER_TTL_MINUTES):
                   (cutoff,))
 
 
-def stale_closed(channel='alipay', limit=50, conn=None):
-    """本地 closed 的单（断线补偿用：先关单后付款的竞态，远端可能已支付）。"""
+def stale_closed(channel='alipay', limit=50, conn=None, hours=48, now_ts=None):
+    """本地 closed 的单（断线补偿用：先关单后付款的竞态，远端可能已支付）。
+
+    时间窗 `hours`（默认 48h）：`closed` 只增不减，一笔未付款的单会永远留在 closed。
+    对账 cron 每 10 分钟一轮，如果不加窗，历史上每一条 closed 单都会被**永久地反复查远端**
+    （4 条 = 576 次/天，50 条 = 7,200 次/天，随时间必然变坏）。
+    口径：关闭超过 `hours` 的单**不再参与对账**——关单 48 小时后仍被支付这种情形不存在
+    （支付宝侧 `timeout_express` 只有 15 分钟，超时即不可付）。
+    """
+    if now_ts is None:
+        import time as _time
+        now_ts = _time.time()
+    cutoff = _utc_str(datetime.fromtimestamp(now_ts - hours * 3600).astimezone())
     return _fetch(conn,
                   "SELECT * FROM pay_orders WHERE status = 'closed' AND channel = ? "
+                  "AND COALESCE(updated_at, created_at) >= ? "
                   "ORDER BY COALESCE(updated_at, created_at) DESC LIMIT ?",
-                  (channel, limit), one=False) or []
+                  (channel, cutoff, limit), one=False) or []
 
 
 def audit_credited_without_ledger(conn=None):
