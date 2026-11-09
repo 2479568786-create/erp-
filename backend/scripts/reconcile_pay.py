@@ -112,11 +112,12 @@ def main():
         line = diag.one_line(summary)
         print('[reconcile][summary] ' + line)
         if summary['total']:
+            # 只告警、不计入 failed：近 24h 的历史失败会在之后 ~144 轮 cron 里持续存在，
+            # 若计进退出码，监控会把「历史失败」误读成「本轮对账失败」。
             print('[reconcile][WARN] 近 24h 失败明细：%s' % json.dumps(
                 {'by_class': summary['by_class'],
                  'orders': [{k: o[k] for k in ('out_trade_no', 'count', 'classes', 'last_at')}
                             for o in summary['orders']]}, ensure_ascii=False)[:600])
-            failed += 1
     except Exception as exc:  # noqa: BLE001 - 汇总失败不影响对账
         print('[reconcile][WARN] diagnostics summary failed: %s' % type(exc).__name__)
 
